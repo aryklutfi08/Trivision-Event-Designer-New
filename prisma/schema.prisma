@@ -1,0 +1,69 @@
+// TriVision Event Designer — auth + saved layouts
+generator client {
+  provider      = "prisma-client-js"
+  // "native" for local dev; "rhel-openssl-3.0.x" for Vercel's serverless runtime.
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Direct (non-pooled) connection used for migrations. With Neon's Vercel
+  // integration this is provided automatically as DATABASE_URL_UNPOOLED.
+  directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  displayName  String?
+  passwordHash String
+  role         String   @default("guest") // "admin" | "guest"
+  magicToken   String?  @unique // passwordless invite/login link secret (client accounts)
+  layouts      Layout[]
+  createdAt    DateTime @default(now())
+}
+
+// Singleton row holding the editable venue structure (room geometry
+// overrides). Edited by admins; read by everyone to render the floor plan.
+model VenueConfig {
+  id        String   @id @default("singleton")
+  data      String   @default("{}") // JSON: { rooms: { [id]: { x, z, w, d } } }
+  updatedAt DateTime @updatedAt
+}
+
+model Layout {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  name       String    @default("Untitled Layout")
+  spaceId    String    @default("A")
+  data       String    @default("[]") // JSON-encoded array of furniture items (portable across DBs)
+  status     String    @default("draft") // "draft" | "pending" (sent for review) | "approved" (locked)
+  approvedAt DateTime?
+  events     Event[]
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([userId])
+}
+
+// Calendar events created by admins. Each can reference a saved client layout.
+model Event {
+  id        String    @id @default(cuid())
+  name      String    @default("New Event")
+  client    String    @default("")
+  date      DateTime?
+  space     String    @default("A") // studio id (A/B/C/…)
+  guests    Int       @default(0)
+  leadStaff String    @default("")
+  status    String    @default("Tentative") // "Confirmed" | "Hold" | "Tentative"
+  archived   Boolean   @default(false) // marked done & moved out of the active calendar
+  archivedAt DateTime?
+  layout    Layout?   @relation(fields: [layoutId], references: [id], onDelete: SetNull)
+  layoutId  String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([layoutId])
+}
