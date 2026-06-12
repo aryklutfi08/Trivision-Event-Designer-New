@@ -172,7 +172,7 @@ const BUILDING = {
   rooms: [
     // ---- LEFT COLUMN (left wall, bottom→top: 46 + 42 + 14 + 8 + 16 = 126) ----
     { id: 'C', name: 'Studio C', sub: 'Optional Breakout Room', x: 0, z: 0, w: 34, d: 46, type: 'event', bookable: 'C', noWall: ['back', 'left', 'right'] },
-    { id: 'B', name: 'Studio B', sub: 'Buffet Dining / Breakout', x: 0, z: 46, w: 26, d: 42, type: 'event', bookable: 'B', door: { side: 'left', at: 0.38 } },
+    { id: 'B', name: 'Studio B', sub: 'Buffet Dining / Breakout', x: 0, z: 46, w: 26, d: 42, type: 'event', bookable: 'B' },
     { id: 'greenroom', name: 'VIP Lounge', sub: 'Green Room', x: 0, z: 88, w: 16, d: 14, type: 'lounge', noWall: ['front'] },
     { id: 'dressing', name: 'Restroom 3', sub: '', x: 0, z: 102, w: 14, d: 8, type: 'restroom', door: { side: 'back' } },
     { id: 'stagingL', name: 'Staging / Food Prep Area', sub: '', x: 0, z: 110, w: 35, d: 16, type: 'service', door: { side: 'back' } },
@@ -217,8 +217,6 @@ const BUILDING = {
   doors: [
     { x: 42, z: 1,   label: 'Main Entrance' },
     { x: 60, z: 1,   label: 'Main Entrance' },
-    { x: 33, z: 62,  label: 'Studio B' },
-    { x: 35, z: 22,  label: 'Studio C' },
     { x: 85, z: 48,  label: 'Lounges' },
     { x: 18, z: 125, label: 'Loading Dock 3' },
     { x: 42, z: 125, label: 'Loading Dock 2' },
