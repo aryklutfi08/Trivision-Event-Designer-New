@@ -577,7 +577,6 @@ function Sidebar({ active, onNav, isMobile, onClose, user, onLogout }) {
     { id: 'dashboard', label: 'Dashboard', icon: '◫' },
     { id: 'floorplan', label: 'Floor Plan', icon: '⌂' },
     { id: 'venue', label: 'Venue Layout', icon: '⊡' },
-    { id: 'designer', label: 'Layout Designer', icon: '✦' },
     { id: 'clients', label: 'Client Layouts', icon: '☷' },
     { id: 'events', label: 'Events', icon: '◐' },
     { id: 'inventory', label: 'Inventory', icon: '⊞' },
@@ -755,10 +754,6 @@ function Dashboard({ events, onOpenEvent, onNewEvent, onNav, isMobile }) {
             <div className="tv-panel rounded-lg p-5">
               <h3 className="font-semibold mb-3">Quick actions</h3>
               <div className="space-y-2">
-                <button onClick={() => onNav('designer')} className="w-full text-left tv-panel-2 hover:border-[var(--tv-gold)] border tv-divider rounded p-3">
-                  <div className="text-sm font-medium">Open Layout Designer →</div>
-                  <div className="text-xs tv-muted mt-0.5">Sketch a new room layout</div>
-                </button>
                 <button onClick={() => onNav('inventory')} className="w-full text-left tv-panel-2 hover:border-[var(--tv-gold)] border tv-divider rounded p-3">
                   <div className="text-sm font-medium">Check inventory →</div>
                   <div className="text-xs tv-muted mt-0.5">Chairs, tables, AV gear</div>
@@ -1544,6 +1539,12 @@ function FloorPlanCanvas({ space, items, onMove, onMoveGroup, onSelect, selected
     dom.addEventListener('wheel', onWheel, { passive: false });
     dom.addEventListener('contextmenu', onContextMenu);
     window.addEventListener('resize', onResize);
+    // Keep the canvas matched to its container even when it mounts before the
+    // layout has settled (e.g. opening an approved layout for the first time):
+    // the canvas would otherwise keep a stale size until a tab switch forced a
+    // re-layout. The observer fires once on attach to correct the initial size.
+    const ro = new ResizeObserver(onResize);
+    ro.observe(container);
 
     // ====== TOUCH HANDLERS (mobile) ======
     // 1 finger: if it lands on an item, drag it. Otherwise orbit the camera.
@@ -1705,6 +1706,7 @@ function FloorPlanCanvas({ space, items, onMove, onMoveGroup, onSelect, selected
       dom.removeEventListener('wheel', onWheel);
       dom.removeEventListener('contextmenu', onContextMenu);
       window.removeEventListener('resize', onResize);
+      ro.disconnect();
       dom.removeEventListener('touchstart', onTouchStart);
       dom.removeEventListener('touchmove', onTouchMove);
       dom.removeEventListener('touchend', onTouchEnd);
@@ -2452,6 +2454,12 @@ function BuildingView({ isMobile, onOpenSpace, activeProject, editable, autoEdit
       renderer.setSize(width, height);
     };
     window.addEventListener('resize', onResize);
+    // Keep the canvas matched to its container even when the surrounding
+    // layout changes without a window resize (e.g. opening the admin combined
+    // view, panels showing/hiding). Without this the canvas keeps its initial
+    // size and a black band covers part of the layout.
+    const ro = new ResizeObserver(onResize);
+    ro.observe(container);
 
     // ---------- ANIMATE ----------
     const proj = new THREE.Vector3();
@@ -2513,6 +2521,7 @@ function BuildingView({ isMobile, onOpenSpace, activeProject, editable, autoEdit
       dom.removeEventListener('touchend', onTouchEnd);
       dom.removeEventListener('touchcancel', onTouchEnd);
       window.removeEventListener('resize', onResize);
+      ro.disconnect();
       st.labels.forEach(l => l.el.remove());
       st.labels = [];
       scene.traverse(obj => {
@@ -2899,7 +2908,7 @@ function FloorPlanScreen({ isMobile, onOpenSpace, projects, activeProject, onCre
   );
 }
 
-function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, onUpdateRoomLayout, onBackToFloorPlan, lockSpaceId }) {
+function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, onUpdateRoomLayout, onBackToFloorPlan, lockSpaceId, undoRef, onUndoState }) {
   const [spaceId, setSpaceId] = useState(lockSpaceId || currentEvent?.space || 'A');
   const space = getSpace(spaceId);
   const [items, setItems] = useState([]);
@@ -2910,6 +2919,14 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
   const [eventClient, setEventClient] = useState(currentEvent?.client || '');
   const [eventGuests, setEventGuests] = useState(currentEvent?.guests || 200);
   const [showSaved, setShowSaved] = useState(false);
+
+  // Undo history: each discrete action (a drag, an add/delete, a preset, …)
+  // pushes the prior items snapshot so Undo can step back one action at a time.
+  const history = useRef([]);
+  const prevItemsRef = useRef(items);
+  const burstRef = useRef(null);
+  const skipHistoryRef = useRef(false);
+  const [canUndo, setCanUndo] = useState(false);
 
   // Project mode: this designer session is editing a room of the active project.
   const projectMode = !!(activeProject && currentEvent?.projectId === activeProject.id);
@@ -2925,6 +2942,10 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
 
   // Initialize layout when event or space changes
   useEffect(() => {
+    // A fresh load is not an undoable action — clear history & don't record it.
+    skipHistoryRef.current = true;
+    history.current = [];
+    setCanUndo(false);
     if (projectMode) {
       // Load this room's saved layout from the active project (may be empty).
       const saved = activeProject.layouts[spaceId] || [];
@@ -2948,6 +2969,41 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
     onUpdateRoomLayout(spaceId, items);
     // eslint-disable-next-line
   }, [items]);
+
+  // Record undo history. A burst of rapid updates (e.g. one drag firing many
+  // setItems calls) is coalesced into a single entry: we snapshot the
+  // pre-burst state once, then ignore the rest until the burst goes quiet.
+  useEffect(() => {
+    const prior = prevItemsRef.current;
+    prevItemsRef.current = items;
+    if (prior === items) return; // no real change (e.g. the empty mount commit)
+    if (skipHistoryRef.current) { skipHistoryRef.current = false; return; } // programmatic load
+    if (burstRef.current) {
+      clearTimeout(burstRef.current);
+    } else {
+      history.current.push(prior);
+      if (history.current.length > 60) history.current.shift();
+      setCanUndo(true);
+    }
+    burstRef.current = setTimeout(() => { burstRef.current = null; }, 350);
+    // eslint-disable-next-line
+  }, [items]);
+
+  // Revert to the snapshot before the last action.
+  const undo = () => {
+    if (!history.current.length) return;
+    if (burstRef.current) { clearTimeout(burstRef.current); burstRef.current = null; }
+    const prev = history.current.pop();
+    skipHistoryRef.current = true;
+    setItems(prev);
+    setSelectedIds([]);
+    setCanUndo(history.current.length > 0);
+  };
+
+  // Expose undo (+ whether anything can be undone) to the surrounding shell so
+  // the guest/client header can drive it.
+  useEffect(() => { if (undoRef) undoRef.current = undo; return () => { if (undoRef) undoRef.current = null; }; });
+  useEffect(() => { if (onUndoState) onUndoState(canUndo); }, [canUndo]);
 
   const applyPreset = (presetId) => {
     const preset = PRESETS.find(p => p.id === presetId);
@@ -3845,7 +3901,7 @@ function LoginScreen({ onAuthed }) {
 
 // Single-layout editor: wraps the Designer with autosave to the backend.
 // Reused by the guest app and the admin client-layouts view.
-function LayoutEditor({ layout, isMobile, onSaved, onStatus, readOnly }) {
+function LayoutEditor({ layout, isMobile, onSaved, onStatus, readOnly, flushRef, undoRef, onUndoState }) {
   const timer = useRef(null);
   const latest = useRef(layout.data || []);
 
@@ -3881,6 +3937,27 @@ function LayoutEditor({ layout, isMobile, onSaved, onStatus, readOnly }) {
 
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
 
+  // Expose a flush so callers (e.g. the Approve button) can persist any pending
+  // debounced edit immediately before acting, instead of losing the last change.
+  useEffect(() => {
+    if (!flushRef) return;
+    flushRef.current = async () => {
+      if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+      if (readOnly) return;
+      try {
+        if (onStatus) onStatus('saving');
+        const updated = await api.updateLayout(layout.id, { data: latest.current });
+        if (onStatus) onStatus('saved');
+        if (onSaved) onSaved(updated);
+        return updated;
+      } catch (e) {
+        if (onStatus) onStatus('error');
+        throw e;
+      }
+    };
+    return () => { if (flushRef) flushRef.current = null; };
+  });
+
   return (
     <Designer
       key={layout.id}
@@ -3890,6 +3967,8 @@ function LayoutEditor({ layout, isMobile, onSaved, onStatus, readOnly }) {
       activeProject={activeProject}
       onUpdateRoomLayout={handleUpdate}
       lockSpaceId={layout.spaceId}
+      undoRef={undoRef}
+      onUndoState={onUndoState}
     />
   );
 }
@@ -3915,6 +3994,9 @@ function GuestApp({ user, onLogout, initialLayoutId }) {
   const [error, setError] = useState(null);
   const [view, setView] = useState('designer'); // 'designer' | 'floorplan'
   const [approving, setApproving] = useState(false);
+  const editorFlush = useRef(null);
+  const editorUndo = useRef(null);
+  const [canUndo, setCanUndo] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -3960,6 +4042,9 @@ function GuestApp({ user, onLogout, initialLayoutId }) {
     if (!window.confirm('Approve your entire floor plan? Your full design across every space is sent to TriVision. You can keep editing afterward and re-approve to send updates.')) return;
     setApproving(true);
     try {
+      // Persist any pending (debounced) edit first so the approval captures the
+      // latest design instead of a stale version.
+      if (editorFlush.current) await editorFlush.current();
       const updatedList = await api.approveAllLayouts();
       setLayouts(updatedList);
     } catch (e) { window.alert(e.message); }
@@ -3993,16 +4078,6 @@ function GuestApp({ user, onLogout, initialLayoutId }) {
       const created = await api.createLayout({ name: name || 'Untitled Layout', spaceId: space, data: [] });
       setLayouts(prev => [created, ...prev]);
       setActiveId(created.id);
-    } catch (e) { window.alert(e.message); }
-  };
-
-  const renameLayout = async () => {
-    if (!active) return;
-    const name = window.prompt('Rename layout', active.name);
-    if (name === null) return;
-    try {
-      const updated = await api.updateLayout(active.id, { name: name || 'Untitled Layout' });
-      patchInList(updated);
     } catch (e) { window.alert(e.message); }
   };
 
@@ -4054,7 +4129,7 @@ function GuestApp({ user, onLogout, initialLayoutId }) {
               {layouts.map(l => <option key={l.id} value={l.id}>{l.name} · {(DESIGNABLE_ROOMS.find(r => r.id === l.spaceId) || {}).label || ('Studio ' + l.spaceId)}</option>)}
             </select>
             <button onClick={newLayout} className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)]">New</button>
-            <button onClick={renameLayout} className="hidden sm:inline-block px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)]">Rename</button>
+            <button onClick={() => editorUndo.current && editorUndo.current()} disabled={!canUndo} className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)] disabled:opacity-40 disabled:cursor-not-allowed">↶ Undo</button>
             <button onClick={deleteLayout} className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 hover:border-red-400 hover:text-red-300">Delete</button>
           </>
         )}
@@ -4069,7 +4144,6 @@ function GuestApp({ user, onLogout, initialLayoutId }) {
             </>
           )}
           <span className="hidden md:inline text-xs tv-muted">{user.displayName}</span>
-          <button onClick={onLogout} className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)]">Sign out</button>
         </div>
       </header>
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">
@@ -4081,7 +4155,7 @@ function GuestApp({ user, onLogout, initialLayoutId }) {
               </div>
             )}
             <div className="flex-1 min-h-0 flex flex-col">
-              <LayoutEditor key={active.id} layout={active} isMobile={isMobile} onSaved={patchInList} onStatus={setStatus} readOnly={false} />
+              <LayoutEditor key={active.id} layout={active} isMobile={isMobile} onSaved={patchInList} onStatus={setStatus} readOnly={false} flushRef={editorFlush} undoRef={editorUndo} onUndoState={setCanUndo} />
             </div>
           </div>
         ) : (
