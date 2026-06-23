@@ -3227,6 +3227,127 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
     setTimeout(() => setShowSaved(false), 2000);
   };
 
+  // Export a print-ready, white-background 2D top-down floor plan. We build a
+  // standalone HTML doc with an inline SVG (all geometry in feet, scaled to a
+  // fixed pixels-per-foot) and open the browser print dialog so workers can
+  // print on paper or "Save as PDF".
+  const exportPdf = () => {
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const n = (v) => Number(v).toFixed(1);
+    const wFt = space.widthFt, dFt = space.depthFt;
+    const PPF = 760 / Math.max(wFt, dFt); // px per foot — longer side ≈ 760px
+    const W = wFt * PPF, H = dFt * PPF;
+
+    // 5-ft reference grid (faint) so crews can eyeball distances.
+    let grid = '';
+    for (let gx = 5; gx < wFt; gx += 5) grid += `<line x1="${n(gx * PPF)}" y1="0" x2="${n(gx * PPF)}" y2="${n(H)}" stroke="#eceff3" stroke-width="1"/>`;
+    for (let gy = 5; gy < dFt; gy += 5) grid += `<line x1="0" y1="${n(gy * PPF)}" x2="${n(W)}" y2="${n(gy * PPF)}" stroke="#eceff3" stroke-width="1"/>`;
+
+    // Fixtures (stage, doors) drawn beneath furniture.
+    const fixtures = (space.fixtures || []).map(fx => {
+      const x = fx.x * PPF, y = fx.y * PPF, w = fx.w * PPF, h = fx.h * PPF;
+      if (fx.type === 'stage') {
+        return `<rect x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}" fill="#1f2937" stroke="#111827" stroke-width="1.5"/>`
+          + `<text x="${n(x + w / 2)}" y="${n(y + h / 2)}" text-anchor="middle" dominant-baseline="central" fill="#ffffff" font-size="11" font-weight="600">STAGE</text>`;
+      }
+      return `<rect x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}" fill="#ffffff" stroke="#9aa3b2" stroke-width="1.5" stroke-dasharray="4 2"/>`;
+    }).join('');
+
+    // Furniture shapes.
+    const shapes = items.map(it => {
+      const f = FURN_BY_ID[it.furnId];
+      if (!f) return '';
+      const swap = it.rotation === 90 || it.rotation === 270;
+      const dims = itemDims(it);
+      const fw = (swap ? dims.h : dims.w) * PPF;
+      const fh = (swap ? dims.w : dims.h) * PPF;
+      const x = it.xFt * PPF, y = it.yFt * PPF;
+      if (f.type === 'drape') {
+        if (fw >= fh) {
+          const cy = y + fh / 2;
+          return `<line x1="${n(x)}" y1="${n(cy)}" x2="${n(x + fw)}" y2="${n(cy)}" stroke="#6b21a8" stroke-width="3" stroke-linecap="round"/>`;
+        }
+        const cx = x + fw / 2;
+        return `<line x1="${n(cx)}" y1="${n(y)}" x2="${n(cx)}" y2="${n(y + fh)}" stroke="#6b21a8" stroke-width="3" stroke-linecap="round"/>`;
+      }
+      if (f.type === 'chair') {
+        return `<rect x="${n(x)}" y="${n(y)}" width="${n(fw)}" height="${n(fh)}" rx="1.5" fill="#aab4c8" stroke="#5b6679" stroke-width="0.8"/>`;
+      }
+      const label = f.capacity > 0 ? `<text x="${n(x + fw / 2)}" y="${n(y + fh / 2)}" text-anchor="middle" dominant-baseline="central" fill="#2b3445" font-size="9" font-weight="600">${f.capacity}</text>` : '';
+      if (f.shape === 'circle') {
+        return `<circle cx="${n(x + fw / 2)}" cy="${n(y + fh / 2)}" r="${n(fw / 2)}" fill="#e6ebf2" stroke="#2b3445" stroke-width="1.2"/>` + label;
+      }
+      return `<rect x="${n(x)}" y="${n(y)}" width="${n(fw)}" height="${n(fh)}" rx="2" fill="#e6ebf2" stroke="#2b3445" stroke-width="1.2"/>` + label;
+    }).join('');
+
+    // Counts legend.
+    const counts = {};
+    items.forEach(it => { counts[it.furnId] = (counts[it.furnId] || 0) + 1; });
+    const drapeFeet = items.reduce((a, it) => a + (FURN_BY_ID[it.furnId] && FURN_BY_ID[it.furnId].type === 'drape' ? (it.lengthFt || 0) : 0), 0);
+    const legend = Object.keys(counts).map(id => {
+      const f = FURN_BY_ID[id];
+      const lbl = f ? f.label : id;
+      const val = f && f.type === 'drape' ? `${Math.round(drapeFeet)} ft` : counts[id];
+      return `<div class="row"><span>${esc(lbl)}</span><span class="qty">${val}</span></div>`;
+    }).join('') || '<div class="row"><span>No furniture placed</span></div>';
+
+    const landscape = wFt > dFt;
+    const when = new Date().toLocaleString();
+    const sub = [eventClient && esc(eventClient), esc(space.name), `${eventGuests} guests`, currentEvent && currentEvent.date ? esc(currentEvent.date) : '']
+      .filter(Boolean).join('  ·  ');
+
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(eventName)} — Floor Plan</title>
+<style>
+  @page { size: ${landscape ? 'landscape' : 'portrait'}; margin: 0.5in; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+  .wrap { padding: 24px; }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  .sub { font-size: 12px; color: #4b5563; margin-bottom: 14px; }
+  .meta { font-size: 11px; color: #6b7280; margin-bottom: 12px; }
+  .grid { display: flex; gap: 24px; align-items: flex-start; }
+  .plan { border: 1px solid #d1d5db; padding: 10px; background: #fff; }
+  .legend { min-width: 200px; }
+  .legend h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #6b7280; margin: 0 0 8px; }
+  .row { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; border-bottom: 1px solid #f0f1f3; }
+  .qty { font-weight: 600; }
+  .toolbar { position: fixed; top: 12px; right: 12px; }
+  .toolbar button { font-size: 13px; padding: 8px 14px; border: 1px solid #111827; background: #111827; color: #fff; border-radius: 6px; cursor: pointer; }
+  @media print { .toolbar { display: none; } .wrap { padding: 0; } }
+</style></head>
+<body>
+  <div class="toolbar"><button onclick="window.print()">Print / Save as PDF</button></div>
+  <div class="wrap">
+    <h1>${esc(eventName)}</h1>
+    <div class="sub">${sub}</div>
+    <div class="meta">Room ${n(wFt)}&prime; &times; ${n(dFt)}&prime;  ·  Top of plan = Main Stage  ·  Bottom = Entrance  ·  Grid = 5&prime;</div>
+    <div class="grid">
+      <div class="plan">
+        <svg width="${n(W)}" height="${n(H)}" viewBox="0 0 ${n(W)} ${n(H)}" xmlns="http://www.w3.org/2000/svg">
+          <rect x="0" y="0" width="${n(W)}" height="${n(H)}" fill="#ffffff" stroke="#111827" stroke-width="2"/>
+          ${grid}
+          ${fixtures}
+          ${shapes}
+        </svg>
+      </div>
+      <div class="legend">
+        <h2>Inventory on floor</h2>
+        ${legend}
+        <div class="meta" style="margin-top:16px">Generated ${esc(when)}</div>
+      </div>
+    </div>
+  </div>
+</body></html>`;
+
+    const win = window.open('', '_blank');
+    if (!win) { window.alert('Please allow pop-ups to export the floor plan as a PDF.'); return; }
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    setTimeout(() => { try { win.print(); } catch (e) {} }, 350);
+  };
+
   // Mobile bottom-sheet tab state
   const [mobileTab, setMobileTab] = useState(null); // null | 'setup' | 'items' | 'props'
   // When the user selects an item on mobile, auto-open the props sheet so they can edit it.
@@ -3508,7 +3629,7 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
             <button onClick={onBackToFloorPlan} className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 flex-shrink-0">⌂ Floor Plan</button>
           )}
           <button onClick={clearAll} className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 flex-shrink-0">Clear</button>
-          <button className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 flex-shrink-0">Export PDF</button>
+          <button onClick={exportPdf} className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 flex-shrink-0">Export PDF</button>
           <button onClick={handleSave} className="px-3 py-1.5 text-xs tv-gold-bg font-medium rounded flex-shrink-0 ml-auto">
             {showSaved ? '✓ Saved' : 'Save'}
           </button>
@@ -3566,7 +3687,7 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
               <button onClick={onBackToFloorPlan} className="px-3 py-2 text-sm rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)]">⌂ View Floor Plan</button>
             )}
             <button onClick={clearAll} className="px-3 py-2 text-sm rounded border tv-divider tv-panel-2 hover:border-red-400 hover:text-red-300">Clear</button>
-            <button className="px-3 py-2 text-sm rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)]">Export PDF</button>
+            <button onClick={exportPdf} className="px-3 py-2 text-sm rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)]">Export PDF</button>
             <button onClick={handleSave} className="px-4 py-2 text-sm tv-gold-bg font-medium rounded">
               {showSaved ? '✓ Saved' : 'Save Layout'}
             </button>
