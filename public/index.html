@@ -298,12 +298,12 @@ const DESIGNABLE_ROOMS = BUILDING.rooms.map(r => ({
 
 // All measurements in feet
 const FURNITURE_LIBRARY = [
-  { id: 'round-60', label: 'Round Table 60"', type: 'table', shape: 'circle', diameter: 5, capacity: 8, color: '#3b4458' },
-  { id: 'round-72', label: 'Round Table 72"', type: 'table', shape: 'circle', diameter: 6, capacity: 10, color: '#3b4458' },
-  { id: 'cocktail', label: 'High-Top Cocktail', type: 'table', shape: 'circle', diameter: 2.5, capacity: 4, color: '#4a3d2b' },
-  { id: 'rect-6', label: 'Rect Table 6′', type: 'table', shape: 'rect', w: 6, h: 2.5, capacity: 6, color: '#3b4458' },
-  { id: 'rect-8', label: 'Rect Table 8′', type: 'table', shape: 'rect', w: 8, h: 2.5, capacity: 8, color: '#3b4458' },
-  { id: 'banquet-chair', label: 'Banquet Chair', type: 'chair', shape: 'rect', w: 1.5, h: 1.5, capacity: 1, color: '#8a99b8' },
+  { id: 'round-60', label: 'Small Round Table', type: 'table', shape: 'circle', diameter: 5, capacity: 8, color: '#3b4458', stock: 23 },
+  { id: 'round-72', label: 'Big Round Table', type: 'table', shape: 'circle', diameter: 6, capacity: 10, color: '#3b4458', stock: 5 },
+  { id: 'cocktail', label: 'Cocktail Table', type: 'table', shape: 'circle', diameter: 2.5, capacity: 4, color: '#4a3d2b', stock: 6 },
+  { id: 'rect-6', label: 'Long Table (2×6)', type: 'table', shape: 'rect', w: 6, h: 2, capacity: 6, color: '#3b4458', stock: 10 },
+  { id: 'rect-8', label: 'Long Table (3×8)', type: 'table', shape: 'rect', w: 8, h: 3, capacity: 8, color: '#3b4458', stock: 10 },
+  { id: 'banquet-chair', label: 'Black Chair', type: 'chair', shape: 'rect', w: 1.5, h: 1.5, capacity: 1, color: '#8a99b8', stock: 200 },
   { id: 'theatre-chair', label: 'Theatre Chair', type: 'chair', shape: 'rect', w: 1.5, h: 1.5, capacity: 1, color: '#8a99b8' },
   { id: 'lounge-sofa', label: 'Lounge Sofa', type: 'lounge', shape: 'rect', w: 5, h: 2.5, capacity: 3, color: '#5a4a3a' },
   { id: 'lounge-chair', label: 'Lounge Chair', type: 'lounge', shape: 'rect', w: 2.5, h: 2.5, capacity: 1, color: '#5a4a3a' },
@@ -311,8 +311,14 @@ const FURNITURE_LIBRARY = [
   { id: 'stage-deck', label: 'Stage Deck 4×8', type: 'fixture', shape: 'rect', w: 8, h: 4, capacity: 0, color: '#2a2f3d' },
   // Drape: an adjustable pipe-and-drape line. Its length lives on the placed
   // item (item.lengthFt), not here — `length` is just the default on add.
-  { id: 'drape', label: 'Drape', type: 'drape', shape: 'line', length: 10, capacity: 0, color: '#6e5170' },
+  // `stock` is the total FEET of drape available, not a piece count.
+  { id: 'drape', label: 'Pipe & Drape', type: 'drape', shape: 'line', length: 10, capacity: 0, color: '#6e5170', stock: 200 },
 ];
+
+// Furniture the user can manually add from the "Add furniture" panel. The full
+// library above still backs presets and previously-saved layouts; this is just
+// the subset offered for placement, in display order.
+const PALETTE_IDS = ['round-72', 'round-60', 'banquet-chair', 'cocktail', 'rect-8', 'rect-6', 'drape'];
 
 const FURN_BY_ID = Object.fromEntries(FURNITURE_LIBRARY.map(f => [f.id, f]));
 
@@ -370,9 +376,9 @@ function presetTheatre(space) {
   for (let y = startY; y <= endY - rowSpacing; y += rowSpacing) {
     for (let i = 0; i < seatsPerHalf; i++) {
       if (items.length >= maxSeats) return items;
-      items.push({ furnId: 'theatre-chair', xFt: startXLeft + i * chairSpacing, yFt: y });
+      items.push({ furnId: 'banquet-chair', xFt: startXLeft + i * chairSpacing, yFt: y });
       if (items.length >= maxSeats) return items;
-      items.push({ furnId: 'theatre-chair', xFt: startXRight + i * chairSpacing, yFt: y });
+      items.push({ furnId: 'banquet-chair', xFt: startXRight + i * chairSpacing, yFt: y });
     }
   }
   return items;
@@ -518,18 +524,13 @@ const SAMPLE_EVENTS = [];
 // Physical venue assets. `deployed` starts at 0 (nothing on the floor until
 // real events are scheduled) so Available = full stock.
 const INVENTORY = [
-  { id: 'inv-1', name: 'Banquet Chair — Chiavari Gold', stock: 400, deployed: 0, category: 'Seating' },
-  { id: 'inv-2', name: 'Standard House Chair', stock: 600, deployed: 0, category: 'Seating' },
-  { id: 'inv-3', name: 'Lounge Sofa — Velvet', stock: 18, deployed: 0, category: 'Seating' },
-  { id: 'inv-4', name: 'Round Table 72"', stock: 50, deployed: 0, category: 'Tables' },
-  { id: 'inv-5', name: 'Round Table 60"', stock: 40, deployed: 0, category: 'Tables' },
-  { id: 'inv-6', name: 'Rectangular Table 6′', stock: 60, deployed: 0, category: 'Tables' },
-  { id: 'inv-7', name: 'High-Top Cocktail', stock: 40, deployed: 0, category: 'Tables' },
-  { id: 'inv-8', name: 'Modular Stage Deck 4×8', stock: 20, deployed: 0, category: 'Staging' },
-  { id: 'inv-9', name: 'Acrylic Podium', stock: 4, deployed: 0, category: 'Staging' },
-  { id: 'inv-10', name: 'Wireless Lavalier Mic', stock: 16, deployed: 0, category: 'AV' },
-  { id: 'inv-11', name: 'Handheld Wireless Mic', stock: 12, deployed: 0, category: 'AV' },
-  { id: 'inv-12', name: 'Roving Camera Op', stock: 3, deployed: 0, category: 'AV' },
+  { id: 'inv-1', name: 'Big Round Table', stock: 5, deployed: 0, category: 'Tables' },
+  { id: 'inv-2', name: 'Small Round Table', stock: 23, deployed: 0, category: 'Tables' },
+  { id: 'inv-3', name: 'Cocktail Tables', stock: 6, deployed: 0, category: 'Tables' },
+  { id: 'inv-4', name: 'Long Tables (3×8)', stock: 10, deployed: 0, category: 'Tables' },
+  { id: 'inv-5', name: 'Long Tables (2×6)', stock: 10, deployed: 0, category: 'Tables' },
+  { id: 'inv-6', name: 'Black Chairs', stock: 200, deployed: 0, category: 'Seating' },
+  { id: 'inv-7', name: 'Pipe and Drape (ft)', stock: 200, deployed: 0, category: 'Draping' },
 ];
 
 // ============================================================
@@ -3006,15 +3007,45 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
   const applyPreset = (presetId) => {
     const preset = PRESETS.find(p => p.id === presetId);
     if (!preset) return;
-    const placed = preset.fn(space).map(it => ({ ...it, id: uid() }));
+    // Cap each furniture type to its available stock so a preset never places
+    // more than we own (e.g. only 6 Cocktail Tables, 5 Big Round Tables).
+    // Presets emit each table immediately followed by its own chairs, so when a
+    // type would exceed stock we stop the whole preset — that keeps table+chair
+    // groups intact instead of leaving orphan chairs around skipped tables.
+    const used = {};
+    const placed = [];
+    for (const it of preset.fn(space)) {
+      const f = FURN_BY_ID[it.furnId];
+      const limit = f && f.stock != null && f.type !== 'drape' ? f.stock : Infinity;
+      if ((used[it.furnId] || 0) + 1 > limit) break;
+      used[it.furnId] = (used[it.furnId] || 0) + 1;
+      placed.push({ ...it, id: uid() });
+    }
     setItems(placed);
     setSelectedIds([]);
+  };
+
+  // ===== Inventory limits =====
+  // How many of a furnId are already on the floor.
+  const placedCount = (furnId) => items.filter(it => it.furnId === furnId).length;
+  // Total feet of pipe-and-drape already on the floor.
+  const drapeFeetUsed = (list = items) => list.reduce((a, it) => {
+    const f = FURN_BY_ID[it.furnId];
+    return a + (f && f.type === 'drape' ? (it.lengthFt || f.length || 0) : 0);
+  }, 0);
+  // Remaining stock for a palette item: feet for drape, piece count otherwise.
+  const remainingStock = (furnId) => {
+    const f = FURN_BY_ID[furnId];
+    if (!f || f.stock == null) return Infinity;
+    return f.type === 'drape' ? f.stock - drapeFeetUsed() : f.stock - placedCount(furnId);
   };
 
   const addItem = (furnId) => {
     const f = FURN_BY_ID[furnId];
     if (f.type === 'drape') {
-      const L = f.length || 10;
+      const remaining = remainingStock(furnId);
+      if (remaining <= 0) return;
+      const L = Math.min(f.length || 10, remaining);
       const it = {
         id: uid(),
         furnId,
@@ -3027,6 +3058,7 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
       setSelectedIds([it.id]);
       return;
     }
+    if (remainingStock(furnId) <= 0) return;
     const size = f.shape === 'circle' ? f.diameter : Math.max(f.w, f.h);
     const it = {
       id: uid(),
@@ -3068,7 +3100,11 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
       const b = swap ? { x: cx, y: cy + L / 2 } : { x: cx + L / 2, y: cy };
       const anchor = end === 'A' ? b : a;
       const ddx = fx - anchor.x, ddy = fy - anchor.y;
-      const maxLen = Math.max(space.widthFt, space.depthFt);
+      // Cap by the room's longest side AND the remaining drape-feet budget
+      // (total feet of all OTHER drape lines must leave room for this one).
+      const otherFeet = drapeFeetUsed(prev) - L;
+      const budgetLeft = f.stock != null ? Math.max(2, f.stock - otherFeet) : Infinity;
+      const maxLen = Math.min(Math.max(space.widthFt, space.depthFt), budgetLeft);
       let rotation, length, ncx, ncy;
       if (Math.abs(ddx) >= Math.abs(ddy)) {
         rotation = 0;
@@ -3102,6 +3138,17 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
   const duplicateItem = (id) => {
     const orig = items.find(it => it.id === id);
     if (!orig) return;
+    const f = FURN_BY_ID[orig.furnId];
+    const remaining = remainingStock(orig.furnId);
+    if (f && f.type === 'drape') {
+      if (remaining <= 0) return;
+      const len = Math.min(orig.lengthFt || f.length || 10, remaining);
+      const copy = { ...orig, id: uid(), lengthFt: len, xFt: orig.xFt + 2, yFt: orig.yFt + 2 };
+      setItems(prev => [...prev, copy]);
+      setSelectedIds([copy.id]);
+      return;
+    }
+    if (remaining <= 0) return;
     const copy = { ...orig, id: uid(), xFt: orig.xFt + 2, yFt: orig.yFt + 2 };
     setItems(prev => [...prev, copy]);
     setSelectedIds([copy.id]);
@@ -3257,9 +3304,13 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
     <div className="p-4">
       <div className="text-xs uppercase tv-muted tracking-wider mb-2">Add furniture</div>
       <div className="space-y-1">
-        {FURNITURE_LIBRARY.map(f => (
-          <button key={f.id} onClick={() => addItem(f.id)}
-            className="w-full flex items-center gap-3 px-2 py-2 rounded hover:bg-[#1d212d] text-left">
+        {PALETTE_IDS.map(id => FURN_BY_ID[id]).filter(Boolean).map(f => {
+          const left = remainingStock(f.id);
+          const maxed = left <= 0;
+          const leftLabel = f.type === 'drape' ? `${Math.max(0, Math.round(left))} ft left` : `${Math.max(0, left)} left`;
+          return (
+          <button key={f.id} onClick={() => addItem(f.id)} disabled={maxed}
+            className={classNames('w-full flex items-center gap-3 px-2 py-2 rounded text-left', maxed ? 'opacity-40 cursor-not-allowed' : 'hover:bg-[#1d212d]')}>
             <div className="w-7 h-7 rounded flex items-center justify-center flex-shrink-0"
                  style={{ background: f.color }}>
               {f.shape === 'circle' && <div className="w-5 h-5 rounded-full border border-white/30"></div>}
@@ -3273,9 +3324,10 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
                 {f.capacity > 0 ? ` · seats ${f.capacity}` : ''}
               </div>
             </div>
-            <span className="text-xs tv-muted">+</span>
+            <span className={classNames('text-[10px] whitespace-nowrap', maxed ? 'text-red-400' : 'tv-muted')}>{leftLabel}</span>
           </button>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
