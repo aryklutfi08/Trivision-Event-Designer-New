@@ -361,7 +361,7 @@ function computeStats(items) {
 // PRESET LAYOUTS — return array of {furnId, xFt, yFt, rotation}
 // ============================================================
 
-function presetTheatre(space) {
+function presetTheatre(space, maxSeats = 250) {
   const items = [];
   const startY = 16; // below stage
   const endY = space.depthFt - 4;
@@ -372,7 +372,6 @@ function presetTheatre(space) {
   const seatsPerHalf = Math.floor(halfWidth / chairSpacing);
   const startXLeft = (space.widthFt - aisleWidth) / 2 - seatsPerHalf * chairSpacing + 1;
   const startXRight = (space.widthFt + aisleWidth) / 2 + 1;
-  const maxSeats = 250;
   for (let y = startY; y <= endY - rowSpacing; y += rowSpacing) {
     for (let i = 0; i < seatsPerHalf; i++) {
       if (items.length >= maxSeats) return items;
@@ -384,7 +383,7 @@ function presetTheatre(space) {
   return items;
 }
 
-function presetBanquet(space) {
+function presetBanquet(space, maxSeats = 160) {
   const items = [];
   const tableSize = 6; // diameter
   const tableSpacingX = 9;
@@ -394,7 +393,6 @@ function presetBanquet(space) {
   const cols = Math.floor((space.widthFt - 6) / tableSpacingX);
   const offsetX = (space.widthFt - (cols - 1) * tableSpacingX) / 2 - tableSize / 2;
   const seatsPerTable = 6;
-  const maxSeats = 160;
   let seatCount = 0;
   for (let y = startY; y <= endY - tableSpacingY; y += tableSpacingY) {
     for (let c = 0; c < cols; c++) {
@@ -426,7 +424,7 @@ function presetBanquet(space) {
   return items;
 }
 
-function presetClassroom(space) {
+function presetClassroom(space, maxSeats = 150) {
   const items = [];
   const startY = 16;
   const endY = space.depthFt - 4;
@@ -434,7 +432,6 @@ function presetClassroom(space) {
   const tableW = 6;
   const tablesPerRow = Math.floor((space.widthFt - 4) / (tableW + 1));
   const offsetX = (space.widthFt - (tablesPerRow * (tableW + 1) - 1)) / 2;
-  const maxSeats = 150;
   let seatCount = 0;
   for (let y = startY; y <= endY - rowSpacing; y += rowSpacing) {
     for (let i = 0; i < tablesPerRow; i++) {
@@ -451,46 +448,55 @@ function presetClassroom(space) {
   return items;
 }
 
-function presetUShape(space) {
+function presetUShape(space, maxSeats = Infinity) {
   const items = [];
   const startY = 18;
   const endY = space.depthFt - 12;
   const sideX1 = space.widthFt / 2 - 8;
   const sideX2 = space.widthFt / 2 + 5;
+  // Each table group seats 3; stop adding groups once we hit the seat target.
+  let seatCount = 0;
   // Top of U (closest to stage) — horizontal tables. Chairs sit north of
   // the table and should face SOUTH (down toward the table) → rotation 180.
   for (let i = 0; i < 3; i++) {
+    if (seatCount + 3 > maxSeats) break;
     items.push({ furnId: 'rect-6', xFt: sideX1 + i * 6, yFt: startY });
     items.push({ furnId: 'banquet-chair', xFt: sideX1 + 0.5 + i * 6, yFt: startY - 2, rotation: 180 });
     items.push({ furnId: 'banquet-chair', xFt: sideX1 + 2.25 + i * 6, yFt: startY - 2, rotation: 180 });
     items.push({ furnId: 'banquet-chair', xFt: sideX1 + 4 + i * 6, yFt: startY - 2, rotation: 180 });
+    seatCount += 3;
   }
   // Left side of U — vertical tables. Chairs sit west of the table and
   // should face EAST (right) toward the table → rotation 90.
   for (let y = startY + 4; y < endY; y += 6) {
+    if (seatCount + 3 > maxSeats) break;
     items.push({ furnId: 'rect-6', xFt: sideX1, yFt: y, rotation: 90 });
     items.push({ furnId: 'banquet-chair', xFt: sideX1 - 2, yFt: y + 0.5, rotation: 90 });
     items.push({ furnId: 'banquet-chair', xFt: sideX1 - 2, yFt: y + 2.25, rotation: 90 });
     items.push({ furnId: 'banquet-chair', xFt: sideX1 - 2, yFt: y + 4, rotation: 90 });
+    seatCount += 3;
   }
   // Right side of U — chairs sit east of the table and should face WEST
   // (left) toward the table → rotation 270.
   for (let y = startY + 4; y < endY; y += 6) {
+    if (seatCount + 3 > maxSeats) break;
     items.push({ furnId: 'rect-6', xFt: sideX2 + 2.5, yFt: y, rotation: 90 });
     items.push({ furnId: 'banquet-chair', xFt: sideX2 + 5, yFt: y + 0.5, rotation: 270 });
     items.push({ furnId: 'banquet-chair', xFt: sideX2 + 5, yFt: y + 2.25, rotation: 270 });
     items.push({ furnId: 'banquet-chair', xFt: sideX2 + 5, yFt: y + 4, rotation: 270 });
+    seatCount += 3;
   }
   return items;
 }
 
-function presetReception(space) {
+function presetReception(space, maxSeats = 80) {
   const items = [];
   const cols = Math.floor(space.widthFt / 8);
   const rows = Math.floor((space.depthFt - 14) / 8);
   const offsetX = (space.widthFt - cols * 8) / 2 + 4;
   const offsetY = 16;
-  const maxTables = 20;
+  // Cocktail high-tops accommodate 4 standing guests each.
+  const maxTables = Math.ceil(maxSeats / 4);
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       // Stagger
@@ -506,12 +512,15 @@ function presetReception(space) {
   return items;
 }
 
+// Each preset carries an adjustable seat target (seats) plus the stepper bounds
+// (min/max) and increment (step) the UI uses. The target is passed into the
+// preset builder, which places up to that many seats (geometry/stock permitting).
 const PRESETS = [
-  { id: 'theatre', label: 'Theatre', desc: 'Rows of chairs facing stage', icon: '🎬', fn: presetTheatre },
-  { id: 'banquet', label: 'Banquet', desc: 'Round tables, seats of 6', icon: '🍽️', fn: presetBanquet },
-  { id: 'classroom', label: 'Classroom', desc: 'Rect tables w/ 3 chairs', icon: '📚', fn: presetClassroom },
-  { id: 'ushape', label: 'U-Shape', desc: 'Tables in a U facing stage', icon: '🔄', fn: presetUShape },
-  { id: 'reception', label: 'Reception', desc: 'Standing high-tops', icon: '🥂', fn: presetReception },
+  { id: 'theatre', label: 'Theatre', desc: 'Rows of chairs facing stage', icon: '🎬', fn: presetTheatre, seats: 120, step: 10, min: 10, max: 250 },
+  { id: 'banquet', label: 'Banquet', desc: 'Round tables, seats of 6', icon: '🍽️', fn: presetBanquet, seats: 24, step: 6, min: 6, max: 60 },
+  { id: 'classroom', label: 'Classroom', desc: 'Rect tables w/ 3 chairs', icon: '📚', fn: presetClassroom, seats: 24, step: 3, min: 3, max: 150 },
+  { id: 'ushape', label: 'U-Shape', desc: 'Tables in a U facing stage', icon: '🔄', fn: presetUShape, seats: 24, step: 3, min: 3, max: 60 },
+  { id: 'reception', label: 'Reception', desc: 'Standing high-tops', icon: '🥂', fn: presetReception, seats: 16, step: 4, min: 4, max: 24 },
 ];
 
 // ============================================================
@@ -2967,6 +2976,11 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
   const [eventClient, setEventClient] = useState(currentEvent?.client || '');
   const [eventGuests, setEventGuests] = useState(currentEvent?.guests || 200);
   const [showSaved, setShowSaved] = useState(false);
+  // Per-preset seat target the stepper edits, and which preset (if any) is
+  // currently on the floor so seat tweaks re-apply it live.
+  const [presetSeats, setPresetSeats] = useState(() =>
+    Object.fromEntries(PRESETS.map(p => [p.id, p.seats])));
+  const [activePreset, setActivePreset] = useState(null);
 
   // Undo history: each discrete action (a drag, an add/delete, a preset, …)
   // pushes the prior items snapshot so Undo can step back one action at a time.
@@ -2994,6 +3008,7 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
     skipHistoryRef.current = true;
     history.current = [];
     setCanUndo(false);
+    setActivePreset(null);
     if (projectMode) {
       // Load this room's saved layout from the active project (may be empty).
       const saved = activeProject.layouts[spaceId] || [];
@@ -3053,25 +3068,69 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
   useEffect(() => { if (undoRef) undoRef.current = undo; return () => { if (undoRef) undoRef.current = null; }; });
   useEffect(() => { if (onUndoState) onUndoState(canUndo); }, [canUndo]);
 
-  const applyPreset = (presetId) => {
-    const preset = PRESETS.find(p => p.id === presetId);
-    if (!preset) return;
-    // Cap each furniture type to its available stock so a preset never places
-    // more than we own (e.g. only 6 Cocktail Tables, 5 Big Round Tables).
-    // Presets emit each table immediately followed by its own chairs, so when a
-    // type would exceed stock we stop the whole preset — that keeps table+chair
-    // groups intact instead of leaving orphan chairs around skipped tables.
+  // Build a preset's furniture for a seat target, capping each furniture type to
+  // its available stock so a preset never places more than we own (e.g. only 6
+  // Cocktail Tables, 5 Big Round Tables). Presets emit each table immediately
+  // followed by its own chairs, so when a type would exceed stock we stop the
+  // whole preset — that keeps table+chair groups intact instead of leaving
+  // orphan chairs around skipped tables.
+  const buildPreset = (preset, targetSeats) => {
     const used = {};
     const placed = [];
-    for (const it of preset.fn(space)) {
+    for (const it of preset.fn(space, targetSeats)) {
       const f = FURN_BY_ID[it.furnId];
       const limit = f && f.stock != null && f.type !== 'drape' ? f.stock : Infinity;
       if ((used[it.furnId] || 0) + 1 > limit) break;
       used[it.furnId] = (used[it.furnId] || 0) + 1;
-      placed.push({ ...it, id: uid() });
+      placed.push(it);
     }
+    return placed;
+  };
+
+  // Max seats each preset can actually seat with the current inventory & room —
+  // i.e. ask for its ceiling and see how many seats survive the stock cap. The
+  // stepper uses this so you can never raise the target past what we can supply.
+  const presetCaps = useMemo(() => {
+    const caps = {};
+    for (const p of PRESETS) {
+      caps[p.id] = Math.min(p.max, computeStats(buildPreset(p, p.max)).capacity);
+    }
+    return caps;
+    // eslint-disable-next-line
+  }, [spaceId]);
+
+  const placePreset = (presetId, targetSeats) => {
+    const preset = PRESETS.find(p => p.id === presetId);
+    if (!preset) return;
+    const placed = buildPreset(preset, targetSeats).map(it => ({ ...it, id: uid() }));
     setItems(placed);
     setSelectedIds([]);
+    setActivePreset(presetId);
+  };
+
+  // Effective seat target for a preset, never above what inventory can supply.
+  const presetTarget = (presetId) => {
+    const preset = PRESETS.find(p => p.id === presetId);
+    return Math.min(presetSeats[presetId] ?? preset.seats, presetCaps[presetId]);
+  };
+
+  const applyPreset = (presetId) => {
+    placePreset(presetId, presetTarget(presetId));
+  };
+
+  // Bump a preset's seat target up/down. If that preset is the one currently on
+  // the floor, re-apply it immediately so the seat count updates live. The
+  // target is clamped to [min, inventory-supplied max], so once stock is
+  // exhausted the "+" can't raise it any further.
+  const adjustPresetSeats = (presetId, delta) => {
+    const preset = PRESETS.find(p => p.id === presetId);
+    if (!preset) return;
+    const cap = presetCaps[presetId];
+    const current = presetTarget(presetId);
+    const next = Math.max(preset.min, Math.min(cap, current + delta));
+    if (next === current) return;
+    setPresetSeats(prev => ({ ...prev, [presetId]: next }));
+    if (activePreset === presetId) placePreset(presetId, next);
   };
 
   // ===== Inventory limits =====
@@ -3462,16 +3521,40 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
       <div className="p-4">
         <div className="text-xs uppercase tv-muted tracking-wider mb-2">Quick presets</div>
         <div className="grid grid-cols-2 gap-2">
-          {PRESETS.map(p => (
-            <button key={p.id} onClick={() => applyPreset(p.id)}
-              className="group tv-panel-2 border tv-divider rounded p-2.5 text-left hover:border-[var(--tv-gold)] transition-colors">
-              <div className="text-[var(--tv-muted)] group-hover:text-[var(--tv-gold)] transition-colors">
-                <PresetIcon id={p.id} />
+          {PRESETS.map(p => {
+            const cap = presetCaps[p.id];
+            const seats = Math.min(presetSeats[p.id] ?? p.seats, cap);
+            const atMax = seats >= cap;     // inventory can't supply any more
+            const atMin = seats <= p.min;
+            return (
+            <div key={p.id}
+              className={classNames(
+                'group tv-panel-2 border rounded p-2.5 transition-colors',
+                activePreset === p.id ? 'border-[var(--tv-gold)]' : 'tv-divider hover:border-[var(--tv-gold)]'
+              )}>
+              <button onClick={() => applyPreset(p.id)} className="text-left w-full">
+                <div className="text-[var(--tv-muted)] group-hover:text-[var(--tv-gold)] transition-colors">
+                  <PresetIcon id={p.id} />
+                </div>
+                <div className="text-xs font-medium mt-1.5">{p.label}</div>
+                <div className="text-[10px] tv-muted">{p.desc}</div>
+              </button>
+              <div className="flex items-center justify-between mt-2 pt-2 border-t tv-divider">
+                <span className="text-[10px] tv-muted uppercase tracking-wider">Seats</span>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => adjustPresetSeats(p.id, -p.step)} disabled={atMin}
+                    aria-label={`Fewer ${p.label} seats`}
+                    className="w-5 h-5 flex items-center justify-center rounded tv-panel border tv-divider text-sm leading-none hover:border-[var(--tv-gold)] hover:text-[var(--tv-gold)] disabled:opacity-30 disabled:cursor-not-allowed">−</button>
+                  <span className="text-xs font-semibold tv-gold w-7 text-center tabular-nums">{seats}</span>
+                  <button onClick={() => adjustPresetSeats(p.id, p.step)} disabled={atMax}
+                    aria-label={`More ${p.label} seats`}
+                    title={atMax ? 'Not enough inventory for more seats' : undefined}
+                    className="w-5 h-5 flex items-center justify-center rounded tv-panel border tv-divider text-sm leading-none hover:border-[var(--tv-gold)] hover:text-[var(--tv-gold)] disabled:opacity-30 disabled:cursor-not-allowed">+</button>
+                </div>
               </div>
-              <div className="text-xs font-medium mt-1.5">{p.label}</div>
-              <div className="text-[10px] tv-muted">{p.desc}</div>
-            </button>
-          ))}
+            </div>
+            );
+          })}
         </div>
       </div>
     </div>

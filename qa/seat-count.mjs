@@ -31,11 +31,11 @@ const src = [
   grab(/const FURNITURE_LIBRARY = \[[\s\S]*?\n\];/, 'FURNITURE_LIBRARY'),
   grab(/const FURN_BY_ID = Object\.fromEntries\([\s\S]*?\);/, 'FURN_BY_ID'),
   grab(/function computeStats\(items\) \{[\s\S]*?\n\}/, 'computeStats'),
-  grab(/function presetTheatre\(space\) \{[\s\S]*?\n\}/, 'presetTheatre'),
-  grab(/function presetBanquet\(space\) \{[\s\S]*?\n\}/, 'presetBanquet'),
-  grab(/function presetClassroom\(space\) \{[\s\S]*?\n\}/, 'presetClassroom'),
-  grab(/function presetUShape\(space\) \{[\s\S]*?\n\}/, 'presetUShape'),
-  grab(/function presetReception\(space\) \{[\s\S]*?\n\}/, 'presetReception'),
+  grab(/function presetTheatre\(space[^)]*\) \{[\s\S]*?\n\}/, 'presetTheatre'),
+  grab(/function presetBanquet\(space[^)]*\) \{[\s\S]*?\n\}/, 'presetBanquet'),
+  grab(/function presetClassroom\(space[^)]*\) \{[\s\S]*?\n\}/, 'presetClassroom'),
+  grab(/function presetUShape\(space[^)]*\) \{[\s\S]*?\n\}/, 'presetUShape'),
+  grab(/function presetReception\(space[^)]*\) \{[\s\S]*?\n\}/, 'presetReception'),
   // Expose what we need back to the host.
   'globalThis.__qa = { FURN_BY_ID, computeStats, presets: {' +
     'theatre: presetTheatre, banquet: presetBanquet, classroom: presetClassroom,' +
