@@ -298,7 +298,7 @@ const DESIGNABLE_ROOMS = BUILDING.rooms.map(r => ({
 
 // All measurements in feet
 const FURNITURE_LIBRARY = [
-  { id: 'round-60', label: 'Small Round Table', type: 'table', shape: 'circle', diameter: 5, capacity: 5, color: '#3b4458', stock: 23 },
+  { id: 'round-60', label: 'Small Round Table', type: 'table', shape: 'circle', diameter: 5, capacity: 6, color: '#3b4458', stock: 23 },
   { id: 'round-72', label: 'Big Round Table', type: 'table', shape: 'circle', diameter: 6, capacity: 10, color: '#3b4458', stock: 5 },
   { id: 'cocktail', label: 'Cocktail Table', type: 'table', shape: 'circle', diameter: 2.5, capacity: 4, color: '#4a3d2b', stock: 6 },
   { id: 'rect-6', label: 'Long Table (2×6)', type: 'table', shape: 'rect', w: 6, h: 2, capacity: 6, color: '#3b4458', stock: 10 },
@@ -385,7 +385,7 @@ function presetTheatre(space, maxSeats = 250) {
 
 function presetBanquet(space, maxSeats = 160) {
   const items = [];
-  const tableSize = 6; // diameter
+  const tableSize = 5; // small round diameter
   const tableSpacingX = 9;
   const tableSpacingY = 9;
   const startY = 18;
@@ -398,7 +398,7 @@ function presetBanquet(space, maxSeats = 160) {
     for (let c = 0; c < cols; c++) {
       if (seatCount + seatsPerTable > maxSeats) return items;
       const tx = offsetX + c * tableSpacingX;
-      items.push({ furnId: 'round-72', xFt: tx, yFt: y });
+      items.push({ furnId: 'round-60', xFt: tx, yFt: y });
       // 6 chairs around each table
       const cx = tx + tableSize / 2;
       const cy = y + tableSize / 2;
@@ -516,10 +516,10 @@ function presetReception(space, maxSeats = 80) {
 // (min/max) and increment (step) the UI uses. The target is passed into the
 // preset builder, which places up to that many seats (geometry/stock permitting).
 const PRESETS = [
-  { id: 'theatre', label: 'Theatre', desc: 'Rows of chairs facing stage', icon: '🎬', fn: presetTheatre, seats: 120, step: 10, min: 10, max: 250 },
-  { id: 'banquet', label: 'Banquet', desc: 'Round tables, seats of 6', icon: '🍽️', fn: presetBanquet, seats: 24, step: 6, min: 6, max: 60 },
-  { id: 'classroom', label: 'Classroom', desc: 'Rect tables w/ 3 chairs', icon: '📚', fn: presetClassroom, seats: 24, step: 3, min: 3, max: 150 },
-  { id: 'ushape', label: 'U-Shape', desc: 'Tables in a U facing stage', icon: '🔄', fn: presetUShape, seats: 24, step: 3, min: 3, max: 60 },
+  { id: 'theatre', label: 'Theatre', desc: 'Rows of chairs facing stage', icon: '🎬', fn: presetTheatre, seats: 120, step: 10, min: 10, max: 200 },
+  { id: 'banquet', label: 'Banquet', desc: 'Round tables, seats of 6', icon: '🍽️', fn: presetBanquet, seats: 24, step: 6, min: 6, max: 138 },
+  { id: 'classroom', label: 'Classroom', desc: 'Rect tables w/ 3 chairs', icon: '📚', fn: presetClassroom, seats: 24, step: 3, min: 3, max: 30 },
+  { id: 'ushape', label: 'U-Shape', desc: 'Tables in a U facing stage', icon: '🔄', fn: presetUShape, seats: 24, step: 3, min: 3, max: 30 },
   { id: 'reception', label: 'Reception', desc: 'Standing high-tops', icon: '🥂', fn: presetReception, seats: 16, step: 4, min: 4, max: 24 },
 ];
 
@@ -2977,9 +2977,11 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
   const [eventGuests, setEventGuests] = useState(currentEvent?.guests || 200);
   const [showSaved, setShowSaved] = useState(false);
   // Per-preset seat target the stepper edits, and which preset (if any) is
-  // currently on the floor so seat tweaks re-apply it live.
+  // currently on the floor so seat tweaks re-apply it live. Start each target at
+  // its ceiling (p.max) so presetTarget collapses to the real inventory/room cap
+  // and every preset opens fully loaded — the stepper then only steps down.
   const [presetSeats, setPresetSeats] = useState(() =>
-    Object.fromEntries(PRESETS.map(p => [p.id, p.seats])));
+    Object.fromEntries(PRESETS.map(p => [p.id, p.max])));
   const [activePreset, setActivePreset] = useState(null);
 
   // Undo history: each discrete action (a drag, an add/delete, a preset, …)
