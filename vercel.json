@@ -3,7 +3,8 @@
   "buildCommand": "npx prisma generate && npx prisma migrate deploy && node prisma/seed.js",
   "functions": {
     "api/index.js": {
-      "includeFiles": "public/**"
+      "includeFiles": "public/**",
+      "maxDuration": 300
     }
   },
   "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }]
