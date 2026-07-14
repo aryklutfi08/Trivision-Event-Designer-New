@@ -48,6 +48,20 @@ model Layout {
   @@index([userId])
 }
 
+// AI-generated Studio C renders saved to the gallery (admin feature).
+// Images are stored as base64 data URLs: a small JPEG thumb for the grid
+// and the full-size PNG fetched only when a render is opened.
+model Render {
+  id        String   @id @default(cuid())
+  name      String   @default("Studio C Render")
+  spaceId   String   @default("C")
+  preset    String?
+  summary   String   @default("")
+  thumb     String
+  image     String
+  createdAt DateTime @default(now())
+}
+
 // Calendar events created by admins. Each can reference a saved client layout.
 model Event {
   id        String    @id @default(cuid())

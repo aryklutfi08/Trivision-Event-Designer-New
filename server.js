@@ -1,4 +1,5 @@
 require('dotenv').config();
+const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
@@ -10,7 +11,9 @@ function newToken() {
 }
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+// 24mb: saving an AI render posts a full-size base64 PNG — HD renders
+// (2048x1152, quality high) can reach several MB before base64 overhead.
+app.use(express.json({ limit: '24mb' }));
 
 // Resolve the static dir from the working directory (reliable under Vercel's
 // bundler, where __dirname can be rewritten). cwd is the project root both
@@ -513,6 +516,644 @@ app.delete('/api/events/:id', async (req, res) => {
   } catch (e) {
     console.error('delete event error', e);
     res.status(500).json({ error: 'Could not delete event.' });
+  }
+});
+
+// ---- AI render (per studio) ----
+// Generates a photorealistic image of a studio furnished with the current
+// layout, using that studio's empty-room reference photo as the base image.
+// The OpenAI key stays server-side. Admin only — each render costs credits.
+//
+// Each studio provides: a folder under public/ holding empty-room.(png|jpg)
+// and an optional furniture/ subfolder, plus a fixed architectural
+// description the model must preserve.
+const STUDIO_RENDER = {
+  C: {
+    name: 'Studio C',
+    dir: 'studio-c',
+    description: 'black open ceiling with exposed pipes, conduit and track lighting; a white 3D-textured accent wall at the back; '
+      + 'white walls with a dark wood panel on the right side; dark gray carpet.',
+    // Designer plans put the stage/front at the TOP edge (yFt = 0). The C
+    // photo looks toward the back of the room, so plan-top = far wall.
+    planOrientation: 'the TOP edge of the plan is the far/back wall seen in the photo and the BOTTOM edge is the camera side',
+    // Studio C renders from the single front view only (no angle picker).
+    // The reverse-angle photo (toward the glass entrance) stays available as
+    // a material/lighting reference via extraRefs.
+    extraRefs: ['angle-entrance.jpg'],
+  },
+  B: {
+    name: 'Studio B',
+    dir: 'studio-b',
+    description: 'a matte black-box event studio: floor-to-ceiling black pleated blackout curtains/drapes lining every wall; a '
+      + 'black open drop-grid ceiling crossed by exposed pipes and rigging, fitted with recessed LED panel lights and track/spot '
+      + 'lighting, plus a small crystal chandelier hanging near the front; and a dark charcoal-gray carpet floor. The overall mood '
+      + 'is very dark and dramatic, lit only by the ceiling fixtures pooling light on the floor.',
+    // The base photo (empty-room.jpg) looks INTO the room from the entrance,
+    // so plan-top = far wall, plan-bottom = camera side, matching the
+    // un-flipped plan view (see STUDIO_PLAN_VIEW).
+    planOrientation: 'the TOP edge of the plan is the far/back of the room seen in the photo and the BOTTOM edge is the camera side',
+    // Studio B renders from the single front view only (no angle picker —
+    // one entry means the client hides it). The other room photos remain
+    // material/lighting references via extraRefs.
+    extraRefs: ['angle-2-wide.jpg', 'angle-3-lights.jpg', 'angle-4-corner.jpg'],
+  },
+  A: {
+    name: 'Studio A',
+    dir: 'studio-a',
+    description: 'a large black-box event studio: a black open ceiling crossed by exposed metal truss/rigging with bright suspended '
+      + 'stage spotlights; matte black walls; a full-height dark stage curtain/drape running along the right wall; a tan-gray carpet '
+      + 'floor marked with faint white tape lines; a freestanding white cube partition wall with a rectangular window opening on the '
+      + 'left; a green hedge/greenery wall with a red carpet runner in the far-left background; a recessed brushed-gold niche set into '
+      + 'the black back wall; and a glossy black stone counter surface spanning the foreground.',
+    // The A photo is taken FROM the main stage (the glossy black counter in
+    // the foreground is the stage edge), and designer plans put the stage at
+    // the TOP edge — so plan-top = camera side, plan-bottom = far wall.
+    planOrientation: 'the photo is taken from the main stage, so the TOP edge of the plan (the stage side) is NEAREST the camera '
+      + 'and the BOTTOM edge of the plan is the far wall seen in the distance; the plan\'s left/right match the photo\'s left/right '
+      + 'when looking out from the stage',
+    // Selectable camera angles. The first entry is the default photo (from
+    // the stage). The second appears in the picker automatically once its
+    // photo is saved at public/studio-a/angle-facing-stage.jpg — a shot from
+    // the BACK of the room looking toward the main stage / LED wall. It uses
+    // flip:false because, facing the stage, the plan's stage-edge (top) is
+    // the far side of the photo — the designer plan reads literally.
+    // Studio A's two angles are OPPOSITE views (from-stage sees the audience
+    // wall; facing-stage sees the LED wall). They must NOT be cross-attached as
+    // material references — doing so bled the LED video wall into the from-stage
+    // render. Each view's own base photo already defines its architecture.
+    crossAngleRefs: false,
+    angles: [
+      { id: 'stage', file: 'empty-room.jpg', label: 'From the stage' },
+      {
+        id: 'facing-stage', file: 'angle-facing-stage.jpg', label: 'Facing the stage', flip: false,
+        description: 'a large black-box event studio seen from the back of the room looking toward the main stage: a low black '
+          + 'stage riser carrying a large LED video wall (the bright focal point in the center distance, typically showing vibrant '
+          + 'content); a black open ceiling crossed by exposed metal box-truss rigging hung with warm theatrical spotlights; '
+          + 'full-height black blackout drapes running down the LEFT wall and across the back; on the RIGHT a long white wall with '
+          + 'a row of large glass windows and a built-in kitchenette/pantry, fronted by a red carpet runner along its base; and a '
+          + 'dark charcoal-gray carpet covering the floor. The mood is dark and dramatic, lit by warm spotlights pooling on the floor.',
+      },
+    ],
+  },
+};
+
+// Presentation directive appended to every furnished render (all studios,
+// preview + HD). Strictly limited to photographic quality — materials,
+// lighting, realism — it must never ADD objects or redesign the setup. The
+// one opt-in exception is décor greenery (the 🌿 toggle in the render
+// overlay): edge-of-room plants that never touch the furniture layout.
+const presentationStyle = (decor) =>
+  'PRESENTATION QUALITY (strictly secondary to layout preservation): render the scene as a polished, professional event-venue '
+  + 'photograph — realistic materials, crisp linens, natural soft shadows, warm flattering light from the room\'s EXISTING '
+  + 'fixtures, and clean photographic composition. Do NOT add any new objects to achieve this: no chandeliers, '
+  + (decor ? '' : 'no plants or greenery, no flowers, ')
+  + 'no lamps, no draping, no décor items, and no furniture beyond what the manifest lists. Where the room has a stage, LED '
+  + 'wall, or professional stage lighting, those remain the visual centerpiece. Accuracy to the submitted floor plan matters '
+  + 'MORE than making the image look full, symmetric, or fancy — an exact, sparse-looking room is correct; an embellished one '
+  + 'is wrong.'
+  + (decor
+    ? '\n\nBEAUTIFICATION (requested by the client — the furniture rules above still override everything): make the scene '
+      + 'gorgeous, upscale and event-ready while staying photorealistic. Add ALL of the following:\n'
+      + '• AESTHETIC LIGHTING — a warm, inviting ambient glow; cinematic uplighting washing the walls and drapes; soft pools of '
+      + 'light on the floor; gentle highlights on the linens.\n'
+      + '• CHANDELIERS — elegant crystal or champagne-gold chandeliers hanging from the ceiling structure/truss, spaced evenly '
+      + 'over the room and glowing warmly.\n'
+      + '• ROUND RUGS — a round black-and-gold patterned area rug centered UNDER EACH round table, slightly wider than the '
+      + 'table so it frames the chairs\' front legs.\n'
+      + '• GREENERY — tall potted plants (palms, ficus or olive trees) in the corners, along the walls and flanking the stage '
+      + 'or entrance, plus subtle floral accents and champagne-gold décor details.\n'
+      + 'STRICT placement rules: these additions live on the CEILING, the WALLS, the room\'s EDGES/CORNERS, or flat UNDER '
+      + 'existing furniture (rugs). They must never move, add, remove, crowd, or replace any table or chair; never block '
+      + 'aisles, walkways, or sightlines to the stage. Furniture counts and positions from the manifest stay exact.'
+    : '');
+
+// Turn the client layout manifest into a compact, explicit text block so the
+// image model places each object at its exact plan coordinate. Validated
+// defensively — anything malformed is skipped rather than trusted.
+function formatManifest(m) {
+  if (!m || !Array.isArray(m.objects) || m.objects.length === 0) return '';
+  const objs = m.objects.filter(o => o && typeof o.id === 'number' && typeof o.type === 'string');
+  if (!objs.length) return '';
+  const total = objs.length;
+  const lines = [];
+  lines.push(`LAYOUT MANIFEST — exactly ${total} object(s). The finished photo must contain ${total} pieces of furniture in total: no more, no fewer.`);
+
+  if (Array.isArray(m.clusters)) {
+    m.clusters.forEach(c => {
+      if (!c || !Array.isArray(c.chairIds)) return;
+      if (c.chairIds.length === 0) {
+        // A chairless table must be stated loudly: reference photos of this
+        // venue's table setups include chairs, and without this line the
+        // model helpfully "completes" the table with seats nobody placed.
+        lines.push(`• Table #${c.tableId} stands COMPLETELY BARE — it has ZERO chairs. Render this table with NO chairs, `
+          + 'NO stools, and NO seating of any kind around it, even if a reference photo shows chairs with this table type.');
+      } else {
+        lines.push(`• Table #${c.tableId}: EXACTLY ${c.chairIds.length} chair(s) around it (chairs #${c.chairIds.join(', #')}) — no more, no fewer. `
+          + `Do NOT add extra chairs to "complete" or fill the ring: leave the empty sides of the table open, showing bare floor, `
+          + `even though a fully-set round table normally holds more than ${c.chairIds.length}.`);
+      }
+    });
+  }
+  if (Array.isArray(m.standaloneChairs) && m.standaloneChairs.length) {
+    lines.push(`• Standalone chairs — NOT placed at any table: #${m.standaloneChairs.join(', #')}. These stay free-standing `
+      + 'exactly where their coordinates put them. Do NOT move them to a table, do NOT place a table near them, and do NOT '
+      + 'regroup them into banquet seating. Standalone chairs arranged in rows must remain in straight ROWS with the exact '
+      + 'facing stated for each chair (e.g. rows facing the stage stay rows facing the stage).');
+  }
+  // No chairs anywhere → say so once, unmissably.
+  const hasAnyChair = (Array.isArray(m.clusters) && m.clusters.some(c => c && Array.isArray(c.chairIds) && c.chairIds.length > 0))
+    || (Array.isArray(m.standaloneChairs) && m.standaloneChairs.length > 0);
+  if (!hasAnyChair) {
+    lines.push('• THIS LAYOUT CONTAINS NO CHAIRS AT ALL. The finished photo must show ZERO chairs — every table stands bare.');
+  }
+  lines.push('Per-item coordinates for every piece are in the STRUCTURED LAYOUT JSON below — place each item at its exact xFt/yFt.');
+  return lines.join('\n');
+}
+
+// Compact machine-readable blueprint of the layout: every item's type, plan
+// position, rotation, footprint and table grouping, plus per-type counts.
+// The image model parses coordinates far more reliably from clean JSON than
+// from prose, so this is the authoritative placement source.
+function formatLayoutJson(m) {
+  if (!m || !Array.isArray(m.objects) || m.objects.length === 0) return '';
+  const objs = m.objects.filter(o => o && typeof o.id === 'number' && typeof o.type === 'string');
+  if (!objs.length) return '';
+  const CAP = 200; // bound prompt size on pathological layouts
+  const counts = {};
+  objs.forEach(o => { counts[o.type] = (counts[o.type] || 0) + 1; });
+  const items = objs.slice(0, CAP).map(o => ({
+    id: o.id,
+    type: o.type,
+    xFt: o.xFt, yFt: o.yFt,
+    rotationDeg: o.rotation || 0,
+    widthFt: o.widthFt, depthFt: o.depthFt,
+    atTable: o.aroundTableId || null,
+  }));
+  const blueprint = {
+    roomFt: { w: Number(m.roomWidthFt) || undefined, d: Number(m.roomDepthFt) || undefined },
+    totalItems: objs.length,
+    counts,
+    tableGroups: Array.isArray(m.clusters)
+      ? m.clusters.map(c => ({ tableId: c.tableId, chairIds: Array.isArray(c.chairIds) ? c.chairIds : [] }))
+      : [],
+    standaloneChairIds: Array.isArray(m.standaloneChairs) ? m.standaloneChairs : [],
+    items,
+  };
+  const truncated = objs.length > CAP ? `\n(items list truncated to first ${CAP}; remaining pieces continue the same pattern shown in the plan image.)` : '';
+  return 'STRUCTURED LAYOUT JSON (authoritative placement blueprint — coordinates are in feet on the same grid as the plan image):\n'
+    + JSON.stringify(blueprint) + truncated;
+}
+
+// Locate a room reference photo inside a studio's public folder. With no
+// file given it probes empty-room.(png|jpg|jpeg); with a file it checks that
+// exact name. Returns { path, mime } or null.
+function findRoomPhoto(dir, file) {
+  if (file) {
+    const p = path.join(PUBLIC_DIR, dir, file);
+    if (fs.existsSync(p)) return { path: p, mime: /\.png$/i.test(file) ? 'image/png' : 'image/jpeg' };
+    return null;
+  }
+  for (const ext of ['png', 'jpg', 'jpeg']) {
+    const p = path.join(PUBLIC_DIR, dir, 'empty-room.' + ext);
+    if (fs.existsSync(p)) return { path: p, mime: ext === 'png' ? 'image/png' : 'image/jpeg' };
+  }
+  return null;
+}
+const findEmptyRoom = (dir) => findRoomPhoto(dir);
+
+// Two render tiers. "preview" is the default quick render; "hd" is the
+// slower, pricier final render triggered explicitly from the UI. Model,
+// HD quality/size, and output format are env-configurable; if the API
+// rejects the configured model or size (e.g. gpt-image-2 not yet
+// available on this account) the request degrades gracefully.
+const IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2';
+const IMAGE_MODEL_FALLBACK = 'gpt-image-1';
+const IMAGE_FORMAT = process.env.OPENAI_IMAGE_FORMAT || 'png';
+const RENDER_MODES = {
+  preview: { quality: 'medium', size: '1536x1024' },
+  hd: {
+    quality: process.env.OPENAI_IMAGE_QUALITY || 'high',
+    size: process.env.OPENAI_IMAGE_SIZE || '2048x1152',
+  },
+};
+const SIZE_FALLBACK = '1536x1024'; // largest landscape size gpt-image-1 accepts
+
+// Selectable camera angles for a studio's AI render. Each entry is a real
+// reference photo already served from public/, so `src` doubles as the
+// thumbnail URL. Studios without an angles config return one default entry
+// so the client can treat every studio uniformly.
+app.get('/api/studio-angles/:spaceId', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+  const studio = STUDIO_RENDER[req.params.spaceId];
+  if (!studio) return res.status(404).json({ error: 'Unknown studio.' });
+  const angles = (Array.isArray(studio.angles) ? studio.angles : [])
+    .filter(a => a && a.id && a.file && findRoomPhoto(studio.dir, a.file))
+    .map(a => ({
+      id: a.id,
+      label: a.label || a.id,
+      src: '/' + studio.dir + '/' + a.file,
+      flip: typeof a.flip === 'boolean' ? a.flip : null, // null → client default
+    }));
+  if (!angles.length) {
+    const def = findEmptyRoom(studio.dir);
+    return res.json({
+      angles: def ? [{ id: 'default', label: 'Default view', src: '/' + studio.dir + '/' + path.basename(def.path), flip: null }] : [],
+    });
+  }
+  res.json({ angles });
+});
+
+app.post('/api/render-studio-c', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+  if (user.role !== 'admin') return res.status(403).json({ error: 'Admins only.' });
+
+  const spaceId = typeof (req.body || {}).spaceId === 'string' ? req.body.spaceId : 'C';
+  const studio = STUDIO_RENDER[spaceId];
+  if (!studio) return res.status(400).json({ error: 'AI rendering is not available for this studio.' });
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(503).json({
+      error: 'AI rendering is not configured yet.\nAdd OPENAI_API_KEY to the server environment (.env locally, project env vars on Vercel), then restart.',
+    });
+  }
+  // Optional camera angle: one of the studio's real reference photos. An
+  // unknown/missing id (or a missing file) falls back to the default
+  // empty-room photo rather than erroring.
+  const angleId = typeof (req.body || {}).angle === 'string' ? (req.body || {}).angle : '';
+  const angles = Array.isArray(studio.angles) ? studio.angles : [];
+  const chosenAngle = angles.find(a => a && a.id === angleId) || null;
+  const roomRef = (chosenAngle && findRoomPhoto(studio.dir, chosenAngle.file)) || findEmptyRoom(studio.dir);
+  if (!roomRef) {
+    return res.status(503).json({
+      error: `Reference photo missing.\nSave the empty ${studio.name} photo as public/${studio.dir}/empty-room.png (or .jpg).`,
+    });
+  }
+
+  try {
+    const { planImage, summary, furniture, preset, roomW, roomD, manifest, decor } = req.body || {};
+    const decorOn = decor === true; // 🌿 greenery toggle from the render overlay
+    const summaryText = typeof summary === 'string' ? summary.slice(0, 1500) : '';
+    const presetText = typeof preset === 'string' ? preset.slice(0, 60) : '';
+    const w = Number(roomW) || 34, d = Number(roomD) || 46;
+    const manifestText = formatManifest(manifest);
+    const layoutJsonText = formatLayoutJson(manifest);
+    // Accuracy mode: HD is the strict layout-accuracy tier (uses the plan
+    // snapshot + JSON + empty-room reference and enforces placement hardest);
+    // preview is the faster, more approximate look.
+    const strictLayout = (req.body || {}).mode === 'hd';
+
+    // Exact per-type totals, restated as the LAST layout instruction in the
+    // prompt so the model tallies its output against them before finishing.
+    let finalCountCheck = '';
+    if (manifest && Array.isArray(manifest.objects) && manifest.objects.length) {
+      const typeCounts = {};
+      manifest.objects.forEach((o) => {
+        if (o && typeof o.type === 'string') typeCounts[o.type] = (typeCounts[o.type] || 0) + 1;
+      });
+      const countList = Object.keys(typeCounts).map(t => `exactly ${typeCounts[t]}× ${t}`).join(', ');
+      if (countList) {
+        finalCountCheck = `FINAL COUNT CHECK — before finishing, COUNT the furniture in your image. It must contain ${countList}, `
+          + 'and NOTHING else. Not one piece more, not one piece fewer. If any count differs, the image is wrong.'
+          + (decorOn ? ' (The requested décor — chandeliers, rugs under tables, edge-of-room plants — is allowed and does not '
+            + 'count as furniture.)' : '');
+      }
+    }
+
+    // Decode + validate the layout images up front so the prompt's image
+    // numbering always matches what actually gets attached.
+    const decodePng = (dataUrl) => {
+      if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png;base64,')) return null;
+      const buf = Buffer.from(dataUrl.slice('data:image/png;base64,'.length), 'base64');
+      return (buf.length > 0 && buf.length <= 5 * 1024 * 1024) ? buf : null;
+    };
+    // The perspective layout-lock guide (primary placement map) and the
+    // top-down floor plan (secondary numbered map).
+    const guideBuf = decodePng((req.body || {}).guideImage);
+    const planBuf = decodePng(planImage);
+
+    // Real reference photos of this venue's furniture setups, one per type.
+    // Looked up per furniture id in the studio's own folder first
+    // (public/<studio>/furniture/) for studio-specific styling, then the
+    // shared folder (public/furniture/) used by every studio. Attached
+    // after the room + plan images and cited by position in the prompt.
+    const FURN_REF_DIRS = [
+      path.join(PUBLIC_DIR, studio.dir, 'furniture'),
+      path.join(PUBLIC_DIR, 'furniture'),
+    ];
+    // Style stand-ins for furniture types with no photo of their own: the
+    // venue dresses these identically to the aliased type (same black linen /
+    // same spandex cover), so its photo is a faithful styling reference.
+    // Without this, a type with no photo renders in the model's default look
+    // (e.g. Big Round Tables came out with WHITE tablecloths).
+    const FURN_STYLE_ALIAS = { 'round-72': 'round-60', 'theatre-chair': 'banquet-chair' };
+    const furnRefs = [];
+    (Array.isArray(furniture) ? furniture.slice(0, 10) : []).forEach((f) => {
+      if (!f || typeof f.id !== 'string' || !/^[a-z0-9-]+$/.test(f.id)) return;
+      outer:
+      for (const id of [f.id, FURN_STYLE_ALIAS[f.id]].filter(Boolean)) {
+        for (const dir of FURN_REF_DIRS) {
+          for (const ext of ['png', 'jpg', 'jpeg']) {
+            const p = path.join(dir, id + '.' + ext);
+            if (fs.existsSync(p)) {
+              furnRefs.push({ path: p, mime: ext === 'png' ? 'image/png' : 'image/jpeg', label: String(f.label || f.id).slice(0, 60) });
+              break outer;
+            }
+          }
+        }
+      }
+    });
+
+    // Additional empty-room photos of THIS studio from other angles. When the
+    // studio defines selectable angles, every angle photo EXCEPT the chosen
+    // base becomes a reference; otherwise the static extraRefs list is used.
+    // Attached last; used only to convey true materials/finishes, never the
+    // camera angle.
+    const extraRefNames = (angles.length && studio.crossAngleRefs !== false)
+      ? angles.filter(a => a && a.file && path.join(PUBLIC_DIR, studio.dir, a.file) !== roomRef.path).map(a => a.file)
+      : (Array.isArray(studio.extraRefs) ? studio.extraRefs : []);
+    const extraRoomRefs = extraRefNames
+      .map((name) => {
+        if (typeof name !== 'string' || !/^[a-z0-9-]+\.(png|jpg|jpeg)$/i.test(name)) return null;
+        const p = path.join(PUBLIC_DIR, studio.dir, name);
+        if (!fs.existsSync(p)) return null;
+        return { path: p, mime: /\.png$/i.test(name) ? 'image/png' : 'image/jpeg' };
+      })
+      .filter(Boolean);
+
+    // Attached-image order (drives the "Image N" citations): 1 = empty room,
+    // then the perspective guide, then the top-down plan, then furniture refs,
+    // then extra room refs.
+    let imgN = 1;
+    const guideIdx = guideBuf ? ++imgN : 0;
+    const planIdx = planBuf ? ++imgN : 0;
+    const firstFurnIdx = imgN + 1;
+    const ord = { 2: 'SECOND', 3: 'THIRD', 4: 'FOURTH' };
+
+    const prompt = [
+      `Photorealistic interior photograph of "${studio.name}", a real event venue room.`,
+      'This is a strict photorealistic conversion of the submitted 3D layout, not a creative redesign. Preserve all furniture '
+      + 'exactly as shown — exact count, exact position, exact orientation. Do not add tables, do not add chairs, and do not '
+      + 'rearrange anything.',
+      'The FIRST image is the actual empty room. Preserve its architecture, camera angle, and finishes EXACTLY:',
+      // A chosen angle may carry its own viewpoint-specific description (what
+      // is foreground vs background changes with the camera position).
+      (chosenAngle && chosenAngle.description) || studio.description,
+      'Do not change the room\'s structure, dimensions, wall/ceiling positions, or camera perspective in any way. Tasteful '
+      + 'decorative enhancements described below may be layered ONTO this architecture, but the underlying room must remain '
+      + 'recognizably this exact room.',
+      guideBuf
+        ? `The ${ord[guideIdx] || ('#' + guideIdx)} image is a LAYOUT GUIDE — a clean 3D render of THIS exact layout from the `
+          + 'SAME camera angle as the room photo. Blue cylinders/boxes are tables, orange blocks are chairs (the small light bar '
+          + 'marks the front/facing side of each chair), and the dark slab with the red panel is the stage/LED wall. '
+          + 'USE THIS GUIDE AS THE STRICT PLACEMENT MAP: match the exact furniture positions, spacing, table arrangement, chair '
+          + 'groupings, rows, and stage location from the guide. Use the empty-room photo ONLY for the room architecture, '
+          + 'materials and camera perspective. Improve realism, lighting, materials, greenery and décor, but do NOT move, add, or '
+          + 'remove any furniture relative to the guide — every blue block becomes a real dressed table in the same spot, every '
+          + 'orange block becomes a real chair in the same spot facing the same way.'
+        : '',
+      planBuf
+        ? `The ${ord[planIdx] || ('#' + planIdx)} image is a to-scale top-down 2D floor plan of the same layout, drawn from the SAME viewpoint as the `
+          + `room photo (room ${w} ft wide × ${d} ft deep, with a 5 ft grid). It CONFIRMS the guide from directly overhead — the single source of `
+          + 'truth for how many pieces there are and where each one sits. Reproduce the arrangement it shows EXACTLY: the same '
+          + 'number of tables, in the same grid/rows/clusters, with the same spacing, gaps, aisles and empty areas. Do NOT '
+          + 'substitute a generic, evenly-spaced, or "typical" banquet arrangement, and do NOT slide furniture together to fill '
+          + 'space — if the plan shows 4 tables across and 5 deep with wide gaps, the render shows exactly that. Each round table is '
+          + 'drawn as a numbered circle; match every numbered table to its position. '
+          + 'COORDINATE SYSTEM — read the plan literally, do NOT rotate or mirror it: '
+          + 'the BOTTOM of the plan is nearest the camera (foreground); the TOP of the plan is the far wall (background); the LEFT of '
+          + 'the plan is the LEFT of the photo and the RIGHT is the RIGHT. In the manifest below, x runs 0 (left) to ' + w + ' ft '
+          + '(right) and y runs 0 (far wall) to ' + d + ' ft (nearest the camera): a LARGER y means CLOSER to the camera, a SMALLER '
+          + 'y means farther away. Each chair/seat in the plan carries a small dark triangle on its front edge that points in the '
+          + 'exact direction that seat faces — orient every chair in the render to match its triangle (and the FACING notes below).'
+        : '',
+      manifestText,
+      layoutJsonText,
+      manifestText
+        ? `Use the layout guide${planBuf ? ' image, the top-down plan' : ''} and the STRUCTURED LAYOUT JSON as the STRICT SOURCE OF TRUTH for placement. `
+          + 'The final render may improve materials, lighting, greenery, and realism, but must preserve the number, position, '
+          + 'spacing, and arrangement of all furniture.'
+        : '',
+      strictLayout && manifestText
+        ? `STRICT LAYOUT ACCURACY MODE: treat the layout guide${planBuf ? ' + plan' : ''} + JSON as a precise spatial blueprint. Cross-check every table and `
+          + 'chair against the guide and its JSON coordinate; the grid, row counts, spacing, aisles, chair groupings and stage position must match '
+          + 'the blueprint, not a stylized approximation. When realism and blueprint accuracy conflict, accuracy wins.'
+        : '',
+      manifestText
+        ? 'EXACT LAYOUT PRESERVATION (highest priority — this overrides aesthetics): Place every object from the manifest at its '
+          + 'given x/y center. Do NOT invent, add, duplicate, remove, merge, or omit any furniture — the final furniture count must '
+          + 'equal the manifest total. Do NOT move, rotate, or rearrange furniture to look nicer, more symmetric, or more balanced. '
+          + 'Preserve every object\'s position, the spacing and gaps between objects, and each object\'s distance to the walls and to '
+          + 'the front/stage. Chairs listed as standalone stay separate and free-standing; chairs listed around a table stay around '
+          + 'exactly that table. If in doubt, match the floor-plan image and the manifest, never your own sense of arrangement.'
+        : '',
+      manifestText
+        ? 'CHAIR ORIENTATION (keep positions unchanged — only make facing correct): every chair must face the exact direction given by '
+          + 'its "FACING" value in the manifest. A chair placed around a round table must face INWARD toward that table\'s center — its '
+          + 'seat and front point at the table, its back points outward, away from the table. A standalone chair keeps the exact facing '
+          + 'listed. Do NOT rotate, turn, or re-aim any chair for symmetry, tidiness, or aesthetics, and do not move it while adjusting '
+          + 'its facing.'
+        : '',
+      summaryText
+        ? `As a cross-check, the exact inventory is: ${summaryText}. The rendered furniture must match these quantities exactly.`
+        : (manifestText ? '' : 'Show the room completely empty, exactly as photographed.'),
+      presetText ? `The arrangement style is "${presetText}".` : '',
+      // Beautification applies only to furnished renders; empty-room renders
+      // stay true to the reference photo.
+      manifestText ? presentationStyle(decorOn) : '',
+      ...furnRefs.map((ref, i) =>
+        `Image ${firstFurnIdx + i} is a real photo of this venue's "${ref.label}" setup — replicate that exact styling `
+        + '(same linens, chair covers, colors, and decor) at every position of that furniture type in the plan. IMPORTANT: copy '
+        + 'ONLY the look/materials of that one furniture piece — NOT the number of chairs or how full the table is. If this '
+        + 'reference photo shows a table ringed with chairs, ignore that count entirely; the manifest above is the ONLY authority '
+        + 'on how many chairs each table has (some tables are bare, some have only a few) and where every piece goes.'),
+      extraRoomRefs.length
+        ? `The LAST ${extraRoomRefs.length} image(s) show the SAME empty room from other angles. Use them ONLY to understand the `
+          + 'room\'s true materials, colours, lighting, and finishes. '
+          + 'Do NOT copy their camera angle, framing, or composition, and do NOT bring any architectural feature that appears in them '
+          + '(LED walls, screens, stages, distinctive walls, windows, doors) into this render unless that feature is already visible '
+          + 'in the FIRST image — the empty-room photo is the ONLY source for what walls, screens and fixtures exist in this view.'
+        : '',
+      // Restate exact per-type totals as the model's last instruction — a
+      // final tally to catch dropped or invented pieces (e.g. 5 tables placed
+      // but only 4 drawn).
+      finalCountCheck,
+      'The result must look like a professional, realistic event-venue photograph',
+      'of this exact room fully set up for an event. No people. Do not add any text, signage, lettering, logos, or watermarks',
+      'anywhere in the image — not on walls, not on the floor, nowhere.',
+    ].filter(Boolean).join('\n\n');
+
+    const mode = (req.body || {}).mode === 'hd' ? 'hd' : 'preview';
+    const modeCfg = RENDER_MODES[mode];
+
+    // ---- Render debug preview -------------------------------------------
+    // Full prompt + manifest sent to OpenAI, so you can verify every table
+    // and chair is transmitted with coordinates (not just counts). Set
+    // RENDER_DEBUG=off in the environment to silence it.
+    if (process.env.RENDER_DEBUG !== 'off') {
+      const objCount = manifest && Array.isArray(manifest.objects) ? manifest.objects.length : 0;
+      console.log('\n' + '='.repeat(70));
+      console.log(`[render ${spaceId}/${mode}] angle: ${chosenAngle ? chosenAngle.id : 'default'} · base: ${path.basename(roomRef.path)} · ${objCount} object(s) · guide: ${guideBuf ? 'yes' : 'no'} · plan image: ${planBuf ? 'yes' : 'no'} · furniture refs: ${furnRefs.length} · extra room refs: ${extraRoomRefs.length}`);
+      console.log('-'.repeat(70) + '\nPROMPT:\n' + prompt);
+      if (manifest) {
+        console.log('-'.repeat(70) + '\nMANIFEST (raw objects with coordinates):');
+        console.log(JSON.stringify(manifest.objects, null, 2));
+      }
+      console.log('='.repeat(70) + '\n');
+    }
+
+    // Attempt with the configured model/size; on a rejected model or size,
+    // degrade once per knob and retry, so gpt-image-2 / 2048x1152 configs
+    // keep working on accounts that only have gpt-image-1 today.
+    const attempt = { model: IMAGE_MODEL, size: modeCfg.size, quality: modeCfg.quality, sendFormat: true, sendFidelity: true };
+    let out = null;
+    let lastMsg = 'The image service rejected the request.';
+    for (let tries = 0; tries < 5; tries++) {
+      const form = new FormData();
+      form.append('model', attempt.model);
+      form.append('prompt', prompt);
+      form.append('size', attempt.size);
+      form.append('quality', attempt.quality);
+      if (attempt.sendFormat) form.append('output_format', IMAGE_FORMAT);
+      // keep the real room's look intact (gpt-image-2 rejects this param)
+      if (attempt.sendFidelity) form.append('input_fidelity', 'high');
+      form.append('image[]', new Blob([fs.readFileSync(roomRef.path)], { type: roomRef.mime }), path.basename(roomRef.path));
+      // Order MUST match the "Image N" numbering: guide, then top-down plan.
+      if (guideBuf) {
+        form.append('image[]', new Blob([guideBuf], { type: 'image/png' }), 'layout-guide.png');
+      }
+      if (planBuf) {
+        form.append('image[]', new Blob([planBuf], { type: 'image/png' }), 'floor-plan.png');
+      }
+      furnRefs.forEach((ref) => {
+        form.append('image[]', new Blob([fs.readFileSync(ref.path)], { type: ref.mime }), path.basename(ref.path));
+      });
+      extraRoomRefs.forEach((ref) => {
+        form.append('image[]', new Blob([fs.readFileSync(ref.path)], { type: ref.mime }), path.basename(ref.path));
+      });
+
+      const r = await fetch('https://api.openai.com/v1/images/edits', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+        body: form,
+      });
+      const body = await r.json().catch(() => ({}));
+      if (r.ok) { out = body; break; }
+
+      lastMsg = (body && body.error && body.error.message) || lastMsg;
+      const low = lastMsg.toLowerCase();
+      console.error(`render-studio-c openai error (${attempt.model}, ${attempt.size})`, r.status, lastMsg);
+      // Unsupported-parameter errors first — they mention the model name too,
+      // so they must be checked before the unknown-model fallback.
+      if (low.includes('input_fidelity') && attempt.sendFidelity) {
+        attempt.sendFidelity = false;
+        continue;
+      }
+      if (low.includes('output_format') && attempt.sendFormat) {
+        attempt.sendFormat = false;
+        continue;
+      }
+      if (low.includes('model') && attempt.model !== IMAGE_MODEL_FALLBACK) {
+        attempt.model = IMAGE_MODEL_FALLBACK;
+        attempt.sendFidelity = true; // gpt-image-1 supports it again
+        continue;
+      }
+      if (low.includes('size') && attempt.size !== SIZE_FALLBACK) {
+        attempt.size = SIZE_FALLBACK;
+        continue;
+      }
+      break; // not a degradable error (billing, auth, content policy, …)
+    }
+
+    if (!out) return res.status(502).json({ error: 'AI render failed: ' + lastMsg });
+    const b64 = out && out.data && out.data[0] && out.data[0].b64_json;
+    if (!b64) return res.status(502).json({ error: 'The image service returned no image.' });
+    const mimeExt = IMAGE_FORMAT === 'jpeg' ? 'jpeg' : IMAGE_FORMAT === 'webp' ? 'webp' : 'png';
+    res.json({
+      image: `data:image/${mimeExt};base64,` + b64,
+      mode,
+      model: attempt.model,
+      size: attempt.size,
+    });
+  } catch (e) {
+    console.error('render-studio-c error', e);
+    res.status(500).json({ error: 'Could not render the image. Check the server logs.' });
+  }
+});
+
+// ---- Render gallery (saved AI renders, admin only) ----
+const isImageDataUrl = (s, maxBytes) =>
+  typeof s === 'string'
+  && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(s)
+  && s.length <= maxBytes * 1.4; // base64 is ~1.37x the byte size
+
+app.post('/api/renders', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+  if (user.role !== 'admin') return res.status(403).json({ error: 'Admins only.' });
+  try {
+    const { name, preset, summary, image, thumb, spaceId } = req.body || {};
+    if (!isImageDataUrl(image, 16 * 1024 * 1024)) return res.status(400).json({ error: 'Invalid or oversized image.' });
+    if (!isImageDataUrl(thumb, 400 * 1024)) return res.status(400).json({ error: 'Invalid or oversized thumbnail.' });
+    const render = await prisma.render.create({
+      data: {
+        name: (typeof name === 'string' && name.trim().slice(0, 80)) || 'Studio Render',
+        spaceId: (typeof spaceId === 'string' && /^[A-Z]$/.test(spaceId)) ? spaceId : 'C',
+        preset: typeof preset === 'string' ? preset.slice(0, 60) : null,
+        summary: typeof summary === 'string' ? summary.slice(0, 1500) : '',
+        image,
+        thumb,
+      },
+    });
+    res.json({ id: render.id, name: render.name, preset: render.preset, createdAt: render.createdAt });
+  } catch (e) {
+    console.error('save render error', e);
+    res.status(500).json({ error: 'Could not save the render.' });
+  }
+});
+
+app.get('/api/renders', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+  if (user.role !== 'admin') return res.status(403).json({ error: 'Admins only.' });
+  try {
+    // Thumbs only — full images are fetched one at a time when opened.
+    const renders = await prisma.render.findMany({
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, name: true, spaceId: true, preset: true, summary: true, thumb: true, createdAt: true },
+    });
+    res.json({ renders });
+  } catch (e) {
+    console.error('list renders error', e);
+    res.status(500).json({ error: 'Could not load the gallery.' });
+  }
+});
+
+app.get('/api/renders/:id', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+  if (user.role !== 'admin') return res.status(403).json({ error: 'Admins only.' });
+  try {
+    const render = await prisma.render.findUnique({ where: { id: req.params.id } });
+    if (!render) return res.status(404).json({ error: 'Render not found.' });
+    res.json({ render });
+  } catch (e) {
+    console.error('get render error', e);
+    res.status(500).json({ error: 'Could not load the render.' });
+  }
+});
+
+app.delete('/api/renders/:id', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+  if (user.role !== 'admin') return res.status(403).json({ error: 'Admins only.' });
+  try {
+    await prisma.render.delete({ where: { id: req.params.id } });
+    res.status(204).end();
+  } catch (e) {
+    console.error('delete render error', e);
+    res.status(500).json({ error: 'Could not delete the render.' });
   }
 });
 

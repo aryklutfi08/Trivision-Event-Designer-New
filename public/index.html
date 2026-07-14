@@ -586,6 +586,7 @@ function Sidebar({ active, onNav, isMobile, onClose, user, onLogout }) {
     { id: 'floorplan', label: 'Floor Plan', icon: '⌂' },
     { id: 'venue', label: 'Venue Layout', icon: '⊡' },
     { id: 'clients', label: 'Client Layouts', icon: '☷' },
+    { id: 'gallery', label: 'Render Gallery', icon: '▣' },
     { id: 'events', label: 'Events', icon: '◐' },
     { id: 'inventory', label: 'Inventory', icon: '⊞' },
     { id: 'reports', label: 'Reports', icon: '◆' },
@@ -2965,7 +2966,859 @@ function PresetIcon({ id }) {
   }
 }
 
-function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, onUpdateRoomLayout, onBackToFloorPlan, lockSpaceId, undoRef, onUndoState }) {
+// ----------------------------------------------------------
+// STUDIO C — AI photo render of the actual room
+// ----------------------------------------------------------
+// Full-screen overlay that asks the backend (/api/render-studio-c) for a
+// photorealistic AI-generated image of the real Studio C — based on the
+// empty-room reference photo at /studio-c/empty-room.png — furnished with
+// the user's current 2D layout. The layout is sent both as a rasterized
+// top-down floor plan image and as a furniture summary, so the model can
+// match positions as closely as possible. The OpenAI key lives only on
+// the server; the browser never sees it.
+
+// Shared SVG builders for the top-down plan (used by Export PDF and the
+// AI render snapshot): faint 5-ft grid, fixtures, then furniture shapes.
+function buildPlanSvgParts(space, items, PPF) {
+  const n = (v) => Number(v).toFixed(1);
+  const wFt = space.widthFt, dFt = space.depthFt;
+  const W = wFt * PPF, H = dFt * PPF;
+  // Line weights / fonts scale with resolution so the plan reads the same at
+  // the small PDF size (PPF≈10) and the large render-snapshot size (PPF≈20).
+  const S = PPF / 10.7;
+
+  let grid = '';
+  for (let gx = 5; gx < wFt; gx += 5) grid += `<line x1="${n(gx * PPF)}" y1="0" x2="${n(gx * PPF)}" y2="${n(H)}" stroke="#e2e6ec" stroke-width="${n(S)}"/>`;
+  for (let gy = 5; gy < dFt; gy += 5) grid += `<line x1="0" y1="${n(gy * PPF)}" x2="${n(W)}" y2="${n(gy * PPF)}" stroke="#e2e6ec" stroke-width="${n(S)}"/>`;
+
+  const fixtures = (space.fixtures || []).map(fx => {
+    const x = fx.x * PPF, y = fx.y * PPF, w = fx.w * PPF, h = fx.h * PPF;
+    if (fx.type === 'stage') {
+      return `<rect x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}" fill="#1f2937" stroke="#111827" stroke-width="${n(1.5 * S)}"/>`
+        + `<text x="${n(x + w / 2)}" y="${n(y + h / 2)}" text-anchor="middle" dominant-baseline="central" fill="#ffffff" font-size="${n(11 * S)}" font-weight="700">STAGE</text>`;
+    }
+    return `<rect x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}" fill="#ffffff" stroke="#9aa3b2" stroke-width="${n(1.5 * S)}" stroke-dasharray="${n(4 * S)} ${n(2 * S)}"/>`;
+  }).join('');
+
+  // A small dark wedge on a seat's FRONT edge pointing the way it faces, so the
+  // plan snapshot itself conveys rotation. Chairs are square, so without this a
+  // rotated chair looks identical to an un-rotated one and the AI render (which
+  // leans on this image) ignores the facing change. Designer rotation is
+  // clockwise from "up": 0=up, 90=right, 180=down, 270=left.
+  const facingWedge = (rot, x, y, fw, fh) => {
+    const r = ((rot || 0) % 360 + 360) % 360;
+    const fvx = r === 90 ? 1 : r === 270 ? -1 : 0;
+    const fvy = r === 0 ? -1 : r === 180 ? 1 : 0;
+    if (!fvx && !fvy) return '';
+    const cx = x + fw / 2, cy = y + fh / 2;
+    const alongHalf = fvy ? fh / 2 : fw / 2;
+    const perpHalf = fvy ? fw / 2 : fh / 2;
+    const pvx = -fvy, pvy = fvx; // perpendicular to the facing direction
+    const tipx = cx + fvx * alongHalf, tipy = cy + fvy * alongHalf;
+    const bx = cx + fvx * (alongHalf * 0.45), by = cy + fvy * (alongHalf * 0.45);
+    const hw = perpHalf * 0.55;
+    const b1x = bx + pvx * hw, b1y = by + pvy * hw;
+    const b2x = bx - pvx * hw, b2y = by - pvy * hw;
+    return `<polygon points="${n(tipx)},${n(tipy)} ${n(b1x)},${n(b1y)} ${n(b2x)},${n(b2y)}" fill="#3b4658"/>`;
+  };
+
+  // Table IDs match the manifest: both number the placed furniture in array
+  // order (all placed items are valid, so index+1 lines up with the manifest's
+  // idOf). Numbering the tables lets the model tie each drawn table to its
+  // exact manifest coordinate.
+  let seq = 0;
+  const shapes = items.map(it => {
+    const f = FURN_BY_ID[it.furnId];
+    if (!f) return '';
+    seq++;
+    const id = seq;
+    const swap = it.rotation === 90 || it.rotation === 270;
+    const dims = itemDims(it);
+    const fw = (swap ? dims.h : dims.w) * PPF;
+    const fh = (swap ? dims.w : dims.h) * PPF;
+    const x = it.xFt * PPF, y = it.yFt * PPF;
+    if (f.type === 'drape') {
+      const dw = 3 * S;
+      if (fw >= fh) {
+        const cy = y + fh / 2;
+        return `<line x1="${n(x)}" y1="${n(cy)}" x2="${n(x + fw)}" y2="${n(cy)}" stroke="#6b21a8" stroke-width="${n(dw)}" stroke-linecap="round"/>`;
+      }
+      const cx = x + fw / 2;
+      return `<line x1="${n(cx)}" y1="${n(y)}" x2="${n(cx)}" y2="${n(y + fh)}" stroke="#6b21a8" stroke-width="${n(dw)}" stroke-linecap="round"/>`;
+    }
+    if (f.type === 'chair') {
+      return `<rect x="${n(x)}" y="${n(y)}" width="${n(fw)}" height="${n(fh)}" rx="${n(1.5 * S)}" fill="#aab4c8" stroke="#5b6679" stroke-width="${n(0.8 * S)}"/>`
+        + facingWedge(it.rotation, x, y, fw, fh);
+    }
+    // Tables/fixtures: bold outline + the manifest ID number, so each is an
+    // unmistakable, individually identifiable marker in the plan image.
+    const isTable = f.type === 'table';
+    const idLabel = isTable
+      ? `<text x="${n(x + fw / 2)}" y="${n(y + fh / 2)}" text-anchor="middle" dominant-baseline="central" fill="#111827" font-size="${n(10 * S)}" font-weight="800">${id}</text>`
+      : (f.capacity > 0 ? `<text x="${n(x + fw / 2)}" y="${n(y + fh / 2)}" text-anchor="middle" dominant-baseline="central" fill="#2b3445" font-size="${n(9 * S)}" font-weight="600">${f.capacity}</text>` : '');
+    const stroke = isTable ? 2.2 * S : 1.2 * S;
+    if (f.shape === 'circle') {
+      return `<circle cx="${n(x + fw / 2)}" cy="${n(y + fh / 2)}" r="${n(fw / 2)}" fill="#dbe2ec" stroke="#1f2937" stroke-width="${n(stroke)}"/>` + idLabel;
+    }
+    const rectSvg = `<rect x="${n(x)}" y="${n(y)}" width="${n(fw)}" height="${n(fh)}" rx="${n(2 * S)}" fill="#dbe2ec" stroke="#1f2937" stroke-width="${n(stroke)}"/>` + idLabel;
+    // Lounges (sofas / lounge chairs) are directional too — show their facing.
+    return f.type === 'lounge' ? rectSvg + facingWedge(it.rotation, x, y, fw, fh) : rectSvg;
+  }).join('');
+
+  return { grid, fixtures, shapes, W, H };
+}
+
+// Rasterize the current layout to a PNG data-URL the backend can forward
+// to the image model as a positional reference.
+// How the top-down plan maps into each studio's photo. 'entrance' → the room
+// is photographed from the entrance, so the plan's bottom (entrance) is
+// already nearest the camera (no change). 'stage' → photographed from the
+// stage, so we rotate the plan 180° to bring the stage edge to the bottom.
+// The manifest coordinates use the SAME flip, giving one unified "photo
+// frame": y=0 far wall, y=depth nearest the camera, x=0 left, x=width right,
+// never mirrored — so the model can read the plan literally.
+const STUDIO_PLAN_VIEW = { C: 'entrance', A: 'stage' };
+const planIsFlipped = (spaceId) => STUDIO_PLAN_VIEW[spaceId] === 'stage';
+
+function planToPngDataUrl(space, items, flip) {
+  return new Promise((resolve, reject) => {
+    // Render the plan large (~1400px long side) so the image model can resolve
+    // individual tables and their exact spacing — a 760px plan blurs a dense
+    // grid into an indistinct blob and the model substitutes a generic layout.
+    const PPF = 1400 / Math.max(space.widthFt, space.depthFt);
+    const { grid, fixtures, shapes, W, H } = buildPlanSvgParts(space, items, PPF);
+    const svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`
+      + `<rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" stroke="#111827" stroke-width="2"/>`
+      + grid + fixtures + shapes
+      + `</svg>`;
+    const img = new Image();
+    const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(W); canvas.height = Math.round(H);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // 180° rotation so the plan matches the photo viewpoint (near = bottom).
+      if (flip) { ctx.translate(canvas.width, canvas.height); ctx.rotate(Math.PI); }
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not draw the floor plan snapshot.')); };
+    img.src = url;
+  });
+}
+
+// ── LAYOUT-LOCK GUIDE ──────────────────────────────────────────────────────
+// A clean, flat-shaded PERSPECTIVE snapshot of the exact layout, rendered off-
+// screen with Three.js from roughly the SAME viewpoint as the AI render's
+// reference photo. Unlike the top-down plan, it already shows the furniture in
+// perspective, so the image model no longer has to guess how a flat grid maps
+// into a photo — it just paints realism onto this arrangement. Solid colors:
+// blue tables, orange chairs (with a light front bar for facing), a dark stage
+// slab + red LED wall. Uses the SAME coordinate mapping as the live 3D scene
+// (worldX = xFt-w/2, worldZ = yFt-d/2, rotation via -rot around Y).
+function buildLayoutGuideDataUrl(space, items, flip) {
+  const OUT_W = 1200, OUT_H = 800;
+  const W = space.widthFt, D = space.depthFt;
+  let renderer;
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = OUT_W; canvas.height = OUT_H;
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+    renderer.setSize(OUT_W, OUT_H, false);
+    renderer.setPixelRatio(1);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x20242c);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+    const key = new THREE.DirectionalLight(0xffffff, 0.6);
+    key.position.set(W * 0.3, 90, D * 0.3);
+    scene.add(key);
+
+    // Floor + a light grid so spacing reads clearly.
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(W, D),
+      new THREE.MeshStandardMaterial({ color: 0x3a4150, roughness: 1 })
+    );
+    floor.rotation.x = -Math.PI / 2;
+    scene.add(floor);
+    const grid = new THREE.GridHelper(Math.max(W, D), Math.max(W, D), 0x5b6478, 0x4a5162);
+    grid.position.y = 0.03;
+    scene.add(grid);
+
+    // Stage slab + LED wall (from the studio's fixtures), so its position and
+    // the far wall are unmistakable.
+    (space.fixtures || []).forEach(f => {
+      if (f.type !== 'stage') return;
+      const cx = f.x + f.w / 2 - W / 2;
+      const cz = f.y + f.h / 2 - D / 2;
+      const slab = new THREE.Mesh(new THREE.BoxGeometry(f.w, 1.5, f.h),
+        new THREE.MeshStandardMaterial({ color: 0x14171d, roughness: 0.9 }));
+      slab.position.set(cx, 0.75, cz);
+      scene.add(slab);
+      const led = new THREE.Mesh(new THREE.BoxGeometry(f.w, 9, 0.4),
+        new THREE.MeshBasicMaterial({ color: 0xd23b57 }));
+      led.position.set(cx, 9 / 2 + 1.5, f.y - D / 2 + 0.25);
+      scene.add(led);
+    });
+
+    // Furniture as flat solids.
+    const TABLE_MAT = new THREE.MeshStandardMaterial({ color: 0x2f6fd6, roughness: 0.8 });
+    const CHAIR_MAT = new THREE.MeshStandardMaterial({ color: 0xe08a3c, roughness: 0.85 });
+    const FRONT_MAT = new THREE.MeshBasicMaterial({ color: 0xfff2d6 }); // facing marker
+    const LOUNGE_MAT = new THREE.MeshStandardMaterial({ color: 0x7a5cff, roughness: 0.85 });
+    const DRAPE_MAT = new THREE.MeshStandardMaterial({ color: 0x6b21a8, roughness: 0.9 });
+    const OTHER_MAT = new THREE.MeshStandardMaterial({ color: 0x9aa3b2, roughness: 0.9 });
+
+    items.forEach(it => {
+      const f = FURN_BY_ID[it.furnId];
+      if (!f) return;
+      const dims = itemDims(it);
+      const swap = it.rotation === 90 || it.rotation === 270;
+      const sizeW = swap ? dims.h : dims.w;
+      const sizeD = swap ? dims.w : dims.h;
+      const cx = it.xFt + sizeW / 2 - W / 2;
+      const cz = it.yFt + sizeD / 2 - D / 2;
+      const g = new THREE.Group();
+      g.position.set(cx, 0, cz);
+      g.rotation.y = -((it.rotation || 0) * Math.PI) / 180;
+      if (f.type === 'table') {
+        if (f.shape === 'circle') {
+          const r = f.diameter / 2;
+          const top = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 2.4, 28), TABLE_MAT);
+          top.position.y = 1.2; g.add(top);
+        } else {
+          const b = new THREE.Mesh(new THREE.BoxGeometry(f.w, 2.4, f.h), TABLE_MAT);
+          b.position.y = 1.2; g.add(b);
+        }
+      } else if (f.type === 'chair') {
+        const seat = new THREE.Mesh(new THREE.BoxGeometry(1.3, 1.6, 1.3), CHAIR_MAT);
+        seat.position.y = 0.8; g.add(seat);
+        // Front marker: chairs face -z in local space (same as the live scene).
+        const front = new THREE.Mesh(new THREE.BoxGeometry(1.0, 1.6, 0.2), FRONT_MAT);
+        front.position.set(0, 0.85, -0.7); g.add(front);
+      } else if (f.type === 'lounge') {
+        const b = new THREE.Mesh(new THREE.BoxGeometry(f.w, 1.6, f.h), LOUNGE_MAT);
+        b.position.y = 0.8; g.add(b);
+      } else if (f.type === 'drape') {
+        const L = it.lengthFt || f.length || 10;
+        const b = new THREE.Mesh(new THREE.BoxGeometry(L, 7, 0.4), DRAPE_MAT);
+        b.position.y = 3.5; g.add(b);
+      } else {
+        const b = new THREE.Mesh(new THREE.BoxGeometry(sizeW, 2, sizeD), OTHER_MAT);
+        b.position.y = 1; g.add(b);
+      }
+      scene.add(g);
+    });
+
+    // Camera: match the AI render's viewpoint. flip=true → the near edge is the
+    // stage side (worldZ ≈ -D/2), looking toward +Z; flip=false → near edge is
+    // the entrance/front (worldZ ≈ +D/2), looking toward -Z. Left/right then
+    // agree with the plan's LEFT=x0 / RIGHT=xW convention.
+    const camera = new THREE.PerspectiveCamera(56, OUT_W / OUT_H, 0.5, 1000);
+    const eye = Math.max(7, D * 0.14);
+    const back = D * 0.06;
+    if (flip) {
+      // From the stage, looking OUT at the audience (+Z). Stand at the stage's
+      // downstage edge so the LED wall stays BEHIND the camera (never blocks
+      // the view); if there's no stage, fall back to just inside the top edge.
+      let frontZ = -D / 2 + 6;
+      (space.fixtures || []).forEach(f => { if (f.type === 'stage') frontZ = Math.max(frontZ, (f.y + f.h) - D / 2); });
+      camera.position.set(0, eye, frontZ + 2);
+      camera.lookAt(0, 2, D * 0.32);
+    } else {
+      // Facing the stage from the back of the room, looking toward -Z.
+      camera.position.set(0, eye, D / 2 + back);
+      camera.lookAt(0, 2.5, -D * 0.18);
+    }
+
+    renderer.render(scene, camera);
+    const out = canvas.toDataURL('image/png');
+    return out;
+  } catch (e) {
+    return null; // guide is best-effort; render still proceeds without it
+  } finally {
+    if (renderer) { try { renderer.dispose(); renderer.forceContextLoss && renderer.forceContextLoss(); } catch (_) {} }
+  }
+}
+
+// Full per-object layout manifest, so the renderer places each piece at its
+// exact plan position instead of guessing from counts. Coordinates are the
+// CENTER of each object in feet, in the unified photo frame (see
+// STUDIO_PLAN_VIEW): x 0→width left→right, y 0→depth far→near-camera.
+function buildLayoutManifest(space, items, flip) {
+  const W = space.widthFt, D = space.depthFt;
+  const tx = (x) => flip ? W - x : x;
+  const ty = (y) => flip ? D - y : y;
+  const r1 = (v) => Math.round(v * 10) / 10;
+
+  const objs = items.map((it) => {
+    const f = FURN_BY_ID[it.furnId];
+    if (!f) return null;
+    const dims = itemDims(it);
+    const swap = it.rotation === 90 || it.rotation === 270;
+    const w = swap ? dims.h : dims.w;
+    const d = swap ? dims.w : dims.h;
+    return {
+      f, label: f.label,
+      cx: tx(it.xFt + w / 2), cy: ty(it.yFt + d / 2),
+      w, d, rotation: it.rotation || 0,
+      isTable: f.type === 'table',
+      isChair: f.type === 'chair' || f.type === 'lounge',
+    };
+  }).filter(Boolean);
+
+  // Match chairs to the tables they actually belong to, in two passes so that
+  // rows of theatre/classroom chairs which merely sit near a table are not
+  // mistaken for its seating:
+  //   1. tentatively attach each chair to the nearest table it hugs or faces;
+  //   2. keep the attachment only for tables that look genuinely SEATED.
+  // A ROUND table is "seated" only when its chairs ring it — i.e. they show at
+  // least two different rotations, because banquet chairs each face the centre
+  // from a different angle. A block of theatre chairs all shares ONE rotation,
+  // so a round table dropped inside a seating grid is correctly left bare and
+  // its neighbours stay standalone. RECT tables (classroom) legitimately have
+  // a single row of same-facing chairs, so they stay on plain proximity.
+  const tables = objs.filter(o => o.isTable);
+  const candChairs = new Map(tables.map(t => [t, []]));
+  objs.forEach(o => {
+    o.table = null;
+    if (!o.isChair || !tables.length) return;
+    // Facing unit vector in the SAME (flipped) frame as cx/cy so it lines up
+    // with the direction from the chair to a table. 0=up,90=right,180=down,270=left.
+    const reff = (((o.rotation || 0) + (flip ? 180 : 0)) % 360 + 360) % 360;
+    const fvx = reff === 90 ? 1 : reff === 270 ? -1 : 0;
+    const fvy = reff === 0 ? -1 : reff === 180 ? 1 : 0;
+    let best = null, bd = Infinity;
+    tables.forEach(t => {
+      const radius = Math.max(t.w, t.d) / 2;
+      const dist = Math.hypot(o.cx - t.cx, o.cy - t.cy);
+      if (dist >= bd) return; // already have a closer table
+      const hugging = dist <= radius + 1.6; // basically touching the edge
+      let belongs = hugging;
+      if (!belongs && dist <= radius + 2.5) {
+        const dx = t.cx - o.cx, dy = t.cy - o.cy;
+        const len = Math.hypot(dx, dy) || 1;
+        belongs = (fvx * dx + fvy * dy) / len > 0.6; // facing within ~53° of the table
+      }
+      if (belongs) { best = t; bd = dist; }
+    });
+    if (best) candChairs.get(best).push(o);
+  });
+  tables.forEach(t => {
+    const cand = candChairs.get(t);
+    const isRound = t.f && t.f.shape === 'circle';
+    const distinctRotations = new Set(cand.map(c => ((c.rotation || 0) % 360 + 360) % 360)).size;
+    const seated = isRound ? distinctRotations >= 2 : cand.length > 0;
+    if (seated) cand.forEach(c => { c.table = t; });
+  });
+  // Nearest-neighbour distance → "close to another object" flag.
+  objs.forEach(o => {
+    let nd = Infinity;
+    objs.forEach(x => { if (x !== o) nd = Math.min(nd, Math.hypot(o.cx - x.cx, o.cy - x.cy)); });
+    o.nn = nd;
+  });
+
+  const idOf = new Map(objs.map((o, i) => [o, i + 1]));
+  const hz = (cx) => cx < W / 3 ? 'left' : cx > 2 * W / 3 ? 'right' : 'center';
+  const dz = (cy) => cy > 2 * D / 3 ? 'foreground/near camera' : cy < D / 3 ? 'background/far wall' : 'mid-room';
+  const wall = (o) => {
+    const dl = o.cx, dr = W - o.cx, dfar = o.cy, dnear = D - o.cy;
+    const m = Math.min(dl, dr, dfar, dnear);
+    return m === dfar ? 'far/back wall' : m === dnear ? 'near/front (camera side)' : m === dl ? 'left wall' : 'right wall';
+  };
+  // Facing direction in the unified photo frame. Designer rotation is
+  // clockwise from "up" (toward the top of the plan); the 180° plan flip for
+  // stage-view studios adds 180°. 0°=far wall, 90°=right, 180°=camera,
+  // 270°=left.
+  const facingWord = (rot) => {
+    const t = (((rot || 0) + (flip ? 180 : 0)) % 360 + 360) % 360;
+    if (t >= 315 || t < 45) return 'toward the far wall (back of the chair to the camera)';
+    if (t < 135) return 'toward the right side of the room';
+    if (t < 225) return 'toward the camera (foreground)';
+    return 'toward the left side of the room';
+  };
+
+  const objects = objs.map(o => ({
+    id: idOf.get(o), type: o.label,
+    xFt: r1(o.cx), yFt: r1(o.cy), rotation: o.rotation,
+    widthFt: r1(o.w), depthFt: r1(o.d),
+    zone: `${dz(o.cy)}, ${hz(o.cx)}`,
+    nearestWall: wall(o),
+    aroundTableId: o.table ? idOf.get(o.table) : null,
+    facing: o.table
+      ? `inward toward the center of table #${idOf.get(o.table)}`
+      : (o.isChair ? facingWord(o.rotation) : null),
+    closeToAnother: o.nn <= 3,
+  }));
+  const clusters = tables.map(t => ({
+    tableId: idOf.get(t),
+    chairIds: objs.filter(o => o.table === t).map(o => idOf.get(o)),
+  }));
+  const standaloneChairs = objs.filter(o => o.isChair && !o.table).map(o => idOf.get(o));
+  return { roomWidthFt: W, roomDepthFt: D, totalObjects: objects.length, objects, clusters, standaloneChairs };
+}
+
+// Human-readable furniture summary for the AI prompt, e.g.
+// "6× Round Table 60″ (seats 10), 60× Banquet Chair, 20 ft of Pipe & Drape".
+function buildFurnitureSummary(items) {
+  const counts = {};
+  let drapeFeet = 0;
+  items.forEach(it => {
+    const f = FURN_BY_ID[it.furnId];
+    if (!f) return;
+    if (f.type === 'drape') { drapeFeet += it.lengthFt || 0; return; }
+    counts[it.furnId] = (counts[it.furnId] || 0) + 1;
+  });
+  // Mention a table's seat capacity only when the layout actually contains
+  // chairs — for a chairless layout, "(seats 6)" reads like an instruction
+  // and the AI render obligingly draws six chairs nobody placed.
+  const hasChairs = items.some(it => (FURN_BY_ID[it.furnId] || {}).type === 'chair');
+  const parts = Object.keys(counts).map(id => {
+    const f = FURN_BY_ID[id];
+    const cap = hasChairs && f.capacity > 0 && f.type === 'table' ? ` (seats ${f.capacity})` : '';
+    return `${counts[id]}× ${f.label}${cap}`;
+  });
+  if (drapeFeet > 0) parts.push(`${Math.round(drapeFeet)} ft of pipe-and-drape`);
+  return parts.join(', ');
+}
+
+// Downscale a data-URL image to a small JPEG thumb for the gallery grid.
+function makeThumbDataUrl(srcDataUrl, maxW = 480) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxW / img.naturalWidth);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.naturalWidth * scale);
+      canvas.height = Math.round(img.naturalHeight * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.75));
+    };
+    img.onerror = () => reject(new Error('Could not build the thumbnail.'));
+    img.src = srcDataUrl;
+  });
+}
+
+// Successful AI renders, keyed by studio + layout + mode + camera angle.
+// Reused when the modal remounts (e.g. viewport breakpoint change), reopens
+// with an unchanged layout, or the user flips back to an angle already
+// rendered — we never bill a second API call for the same image. Small
+// capped Map: oldest entry is evicted so memory can't grow unbounded.
+const AI_RENDER_CACHE = new Map();
+const AI_RENDER_CACHE_MAX = 8;
+const renderCacheGet = (k) => AI_RENDER_CACHE.get(k) || null;
+const renderCachePut = (k, image) => {
+  if (AI_RENDER_CACHE.has(k)) AI_RENDER_CACHE.delete(k); // refresh recency
+  AI_RENDER_CACHE.set(k, image);
+  if (AI_RENDER_CACHE.size > AI_RENDER_CACHE_MAX) {
+    AI_RENDER_CACHE.delete(AI_RENDER_CACHE.keys().next().value);
+  }
+};
+const aiRenderKey = (spaceId, items, mode, angle, decor) =>
+  spaceId + '|' + (mode || 'preview') + '|' + (angle || 'default') + '|' + (decor ? 'd1' : 'd0') + '|'
+  + JSON.stringify(items.map(it => [it.furnId, it.xFt, it.yFt, it.rotation, it.lengthFt]));
+
+function StudioCRender({ items, space, spaceId, presetName, initialMode, onClose }) {
+  const studioName = (space && space.name && space.name.split('—')[0].trim()) || ('Studio ' + (spaceId || 'C'));
+  const requestedMode = initialMode === 'hd' ? 'hd' : 'preview';
+  // Reuse a cached image only when it matches layout, mode, camera angle AND
+  // décor setting — reopening or flipping back never re-bills, but a new
+  // combination starts a fresh render of that tier.
+  const cached = renderCacheGet(aiRenderKey(spaceId, items, requestedMode, 'default', true));
+  const [phase, setPhase] = useState(cached ? 'done' : 'loading'); // 'loading' | 'done' | 'error'
+  const [image, setImage] = useState(cached);
+  // 'preview' (quick, cheaper) or 'hd' (Final HD Render — slower, costs more).
+  const [mode, setMode] = useState(requestedMode);
+  // 🌿 Décor greenery: lets the AI add edge-of-room plants (never touching
+  // the furniture layout). Applies to the NEXT render after toggling.
+  const [decor, setDecor] = useState(true);
+  // Camera angle: 'default' = the studio's empty-room photo; other ids come
+  // from /api/studio-angles (real photos only). Studios with ≤1 angle show
+  // no picker.
+  const [angle, setAngle] = useState('default');
+  const [angles, setAngles] = useState([]);
+  const [error, setError] = useState('');
+  const [saveState, setSaveState] = useState('idle'); // 'idle' | 'saving' | 'saved' | 'error'
+  const runId = useRef(0);
+
+  const angleInfo = (id) => angles.find(a => a.id === id) || null;
+  const angleLabel = (id) => { const a = angleInfo(id); return a ? a.label : null; };
+
+  // `force` skips the cache: the explicit "Render … Again" buttons should
+  // produce a fresh image, while angle/mode switches reuse cached renders.
+  const runRender = async (renderMode = 'preview', angleId = angle, force = false) => {
+    const id = ++runId.current;
+    setMode(renderMode);
+    setAngle(angleId);
+    // Instant, free swap when this exact layout+mode+angle+décor was already rendered.
+    const hit = force ? null : renderCacheGet(aiRenderKey(spaceId, items, renderMode, angleId, decor));
+    if (hit) { setImage(hit); setPhase('done'); setError(''); setSaveState('idle'); return; }
+    setPhase('loading'); setError(''); setSaveState('idle');
+    try {
+      const a = angleInfo(angleId);
+      const flip = a && typeof a.flip === 'boolean' ? a.flip : planIsFlipped(spaceId);
+      const planImage = items.length ? await planToPngDataUrl(space, items, flip) : null;
+      // Perspective layout-lock guide rendered from the 3D scene at this angle —
+      // the primary placement reference (best-effort; null if WebGL fails).
+      const guideImage = items.length ? buildLayoutGuideDataUrl(space, items, flip) : null;
+      const manifest = items.length ? buildLayoutManifest(space, items, flip) : null;
+      // Distinct furniture types on the floor — the server attaches a real
+      // reference photo for each type that has one in /studio-c/furniture/.
+      const furniture = [];
+      items.forEach(it => {
+        const f = FURN_BY_ID[it.furnId];
+        if (!f || furniture.some(x => x.id === f.id)) return;
+        furniture.push({ id: f.id, label: f.label });
+      });
+      const resp = await api.renderStudioC({
+        spaceId,
+        mode: renderMode,
+        angle: angleId === 'default' ? undefined : angleId,
+        decor,
+        guideImage,
+        planImage,
+        manifest,
+        summary: buildFurnitureSummary(items),
+        furniture,
+        preset: presetName || null,
+        roomW: space.widthFt,
+        roomD: space.depthFt,
+      });
+      if (id !== runId.current) return; // stale (closed / re-rendered)
+      renderCachePut(aiRenderKey(spaceId, items, renderMode, angleId, decor), resp.image);
+      setImage(resp.image);
+      setPhase('done');
+    } catch (e) {
+      if (id !== runId.current) return;
+      setError(e.message || 'Render failed.');
+      setPhase('error');
+    }
+  };
+
+  useEffect(() => {
+    if (!cached) runRender(requestedMode); // cached image already showing — no new API call
+    // Selectable camera angles (real reference photos). Non-fatal if it fails —
+    // the overlay simply shows no picker.
+    api.studioAngles(spaceId).then(d => setAngles(Array.isArray(d.angles) ? d.angles : [])).catch(() => {});
+    return () => { runId.current++; }; // ignore in-flight result after unmount
+    // eslint-disable-next-line
+  }, []);
+
+  // ESC closes the overlay
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line
+  }, []);
+
+  const download = () => {
+    // `image` is the untouched data URL returned by the API — the original
+    // PNG bytes, never a re-encoded or compressed preview.
+    const a = document.createElement('a');
+    a.href = image;
+    a.download = studioName.toLowerCase().replace(/\s+/g, '-') + '-render'
+      + (angle !== 'default' ? '-' + angle : '') + (mode === 'hd' ? '-hd' : '') + '.png';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const saveToGallery = async () => {
+    if (saveState === 'saving' || saveState === 'saved') return;
+    setSaveState('saving');
+    try {
+      const thumb = await makeThumbDataUrl(image);
+      const angleTag = angle !== 'default' && angleLabel(angle) ? ` · ${angleLabel(angle)}` : '';
+      await api.saveRender({
+        name: `${studioName} · ${presetName || 'Custom layout'}${angleTag}${mode === 'hd' ? ' · HD' : ''} — ${new Date().toLocaleDateString()}`,
+        spaceId,
+        preset: presetName || null,
+        summary: buildFurnitureSummary(items),
+        image,
+        thumb,
+      });
+      setSaveState('saved');
+    } catch (e) {
+      setSaveState('error');
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col bg-black/95">
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b tv-divider tv-panel flex-shrink-0">
+        <div>
+          <div className="text-sm font-semibold tv-gold flex items-center gap-2 flex-wrap">
+            {studioName} — AI Render
+            <span className={classNames(
+              'px-2 py-0.5 rounded text-[10px] font-medium border',
+              mode === 'hd' ? 'tv-gold-bg text-black border-transparent' : 'tv-panel-2 tv-gold border-[var(--tv-gold)]/60'
+            )}>{mode === 'hd' ? '✦ Final HD Render' : '◇ Preview Render'}</span>
+          </div>
+          <div className="text-[11px] tv-muted">
+            {space.widthFt}′ × {space.depthFt}′ · {mode === 'hd' ? 'strict layout accuracy · high quality · 2048×1152' : 'approximate layout · medium quality · 1536×1024 · quick'}
+          </div>
+        </div>
+        <button
+          onClick={onClose}
+          className="px-3 py-1.5 text-xs rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)] hover:text-white tv-muted"
+        >✕ Close</button>
+      </div>
+
+      {/* Body */}
+      {/* min-h-0 lets this area shrink so the footer buttons always stay visible */}
+      <div className="flex-1 min-h-0 relative overflow-hidden flex items-center justify-center p-2 sm:p-4">
+        {phase === 'loading' && (
+          <div className="text-center max-w-sm">
+            <div className="mx-auto mb-4 w-10 h-10 rounded-full border-2 border-[var(--tv-gold)] border-t-transparent animate-spin" />
+            <div className="text-sm font-medium tv-gold">Rendering {studioName}{mode === 'hd' ? ' in HD' : ''}…</div>
+            <div className="text-xs tv-muted mt-1.5">
+              {mode === 'hd'
+                ? 'Building a high-definition final render with strict layout accuracy (snapshot + JSON blueprint). HD costs more and can take 1–3 minutes.'
+                : 'Building a quick photorealistic preview — layout is approximate. This usually takes 15–60 seconds.'}
+            </div>
+          </div>
+        )}
+
+        {phase === 'error' && (
+          <div className="text-center max-w-md tv-panel border tv-divider rounded-lg p-6">
+            <div className="text-sm font-semibold text-red-300">Could not render</div>
+            <div className="text-xs tv-muted mt-2 whitespace-pre-wrap">{error}</div>
+            <div className="mt-4 flex gap-2 justify-center">
+              <button onClick={() => runRender(mode, angle, true)} className="px-3 py-2 text-xs rounded tv-gold-bg font-medium">⟳ Try Again</button>
+              <button onClick={onClose} className="px-3 py-2 text-xs rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)]">Back to Editor</button>
+            </div>
+          </div>
+        )}
+
+        {phase === 'done' && image && (
+          <img
+            src={image}
+            alt={`AI render of ${studioName} with the current layout`}
+            className="max-w-full max-h-full w-auto h-auto object-contain rounded shadow-2xl"
+          />
+        )}
+      </div>
+
+      {/* Camera-angle picker — real reference photos of this studio. The
+          default render uses the first angle's photo, so it is shown as the
+          active choice until another angle is picked. */}
+      {angles.length > 1 && phase !== 'error' && (
+        <div className="px-4 py-2.5 border-t tv-divider tv-panel flex-shrink-0">
+          <div className="flex items-center justify-center gap-2 flex-wrap">
+            <span className="text-[10px] uppercase tracking-wider tv-muted mr-1">View angle</span>
+            {angles.map((a, i) => {
+              const active = angle === a.id || (angle === 'default' && i === 0);
+              // The default render's base photo IS the first angle (see
+              // STUDIO_RENDER), so the first thumb maps to 'default' — this
+              // reuses the initial render's cache instead of re-billing.
+              const targetId = i === 0 ? 'default' : a.id;
+              return (
+                <button
+                  key={a.id}
+                  onClick={() => { if (!active && phase !== 'loading') runRender(mode, targetId); }}
+                  disabled={active || phase === 'loading'}
+                  title={active ? a.label : `${a.label} — renders this angle once, then it's cached`}
+                  className={classNames(
+                    'flex flex-col items-center gap-1 p-1 rounded border transition-colors',
+                    active ? 'border-[var(--tv-gold)]' : 'tv-divider hover:border-[var(--tv-gold)]',
+                    phase === 'loading' && !active ? 'opacity-40 cursor-not-allowed' : ''
+                  )}
+                >
+                  <img src={a.src} alt={a.label} className="w-16 h-10 object-cover rounded-sm" />
+                  <span className={classNames('text-[9px] leading-none', active ? 'tv-gold' : 'tv-muted')}>{a.label}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="mt-1.5 text-center text-[9px] tv-muted">Each angle renders once per layout, then switching back is instant and free.</div>
+        </div>
+      )}
+
+      {/* Footer actions */}
+      {phase === 'done' && (
+        <div className="px-4 py-3 border-t tv-divider tv-panel flex-shrink-0">
+          <div className="flex items-center justify-center gap-2 flex-wrap">
+          <label
+            title="When on, the render is beautified: warm aesthetic lighting, chandeliers, round rugs under the tables, and potted greenery along walls and corners — never touching your furniture layout. Applies to the next render."
+            className={classNames(
+              'px-3 py-2 text-xs rounded border tv-panel-2 flex items-center gap-1.5 cursor-pointer select-none',
+              decor ? 'border-[var(--tv-gold)]/60 tv-gold' : 'tv-divider tv-muted hover:border-[var(--tv-gold)]'
+            )}
+          >
+            <input type="checkbox" checked={decor} onChange={e => setDecor(e.target.checked)} className="accent-[#c8a96a]" />
+            ✨ Beautify
+          </label>
+          <button onClick={onClose} className="px-3 py-2 text-xs rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)]">✎ Edit Layout</button>
+          <button onClick={() => runRender('preview', angle, true)} className="px-3 py-2 text-xs rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)]">◇ Render Preview Again</button>
+          <button
+            onClick={() => runRender('hd', angle, true)}
+            title="High-definition final render — HD costs more and may take 1–3 minutes"
+            className="px-3 py-2 text-xs rounded border border-[var(--tv-gold)]/60 tv-panel-2 tv-gold hover:border-[var(--tv-gold)]"
+          >✦ Render HD Again</button>
+          <button
+            onClick={saveToGallery}
+            disabled={saveState === 'saving' || saveState === 'saved'}
+            className={classNames(
+              'px-3 py-2 text-xs rounded border tv-divider tv-panel-2 disabled:opacity-70',
+              saveState === 'saved' ? 'tv-gold border-[var(--tv-gold)]' : 'hover:border-[var(--tv-gold)]'
+            )}
+          >
+            {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? '✓ Saved to Gallery' : saveState === 'error' ? '⚠ Retry Save' : '▣ Save to Gallery'}
+          </button>
+          <button onClick={download} className="px-4 py-2 text-xs rounded tv-gold-bg font-medium">⬇ Download Image</button>
+          </div>
+          <div className="mt-2 text-center text-[10px] tv-muted">
+            {mode === 'hd'
+              ? 'This is the final HD render — strict layout accuracy. Downloads and gallery saves keep the original full-resolution PNG.'
+              : '✦ For the most faithful furniture placement, use Final HD Render — strict layout accuracy from the snapshot + JSON blueprint.'}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------
+// RENDER GALLERY — saved AI renders (admin)
+// ----------------------------------------------------------
+function RenderGallery({ isMobile }) {
+  const [renders, setRenders] = useState(null); // null = loading
+  const [error, setError] = useState('');
+  const [open, setOpen] = useState(null);       // { ...meta, image? } — viewer
+  const [deleting, setDeleting] = useState(false);
+
+  const load = async () => {
+    try {
+      const data = await api.listRenders();
+      setRenders(data.renders || []);
+    } catch (e) {
+      setError(e.message || 'Could not load the gallery.');
+      setRenders([]);
+    }
+  };
+  useEffect(() => { load(); }, []);
+
+  const openRender = async (r) => {
+    setOpen({ ...r, image: null });
+    try {
+      const { render } = await api.getRender(r.id);
+      setOpen(prev => (prev && prev.id === r.id ? { ...prev, image: render.image } : prev));
+    } catch (e) {
+      setOpen(prev => (prev && prev.id === r.id ? { ...prev, image: 'error' } : prev));
+    }
+  };
+
+  const removeRender = async (r) => {
+    if (!window.confirm(`Delete "${r.name}" from the gallery? This can't be undone.`)) return;
+    setDeleting(true);
+    try {
+      await api.deleteRender(r.id);
+      setRenders(prev => prev.filter(x => x.id !== r.id));
+      setOpen(null);
+    } catch (e) {
+      window.alert(e.message || 'Could not delete the render.');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const download = (r) => {
+    const a = document.createElement('a');
+    a.href = r.image;
+    a.download = (r.name || 'studio-c-render').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() + '.png';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden">
+      <TopBar
+        title="Render Gallery"
+        subtitle="Saved AI renders — open one to download or delete it."
+      />
+      <div className="flex-1 overflow-y-auto scroll-thin p-4 md:p-6">
+        {renders === null ? (
+          <div className="text-sm tv-muted">Loading gallery…</div>
+        ) : error ? (
+          <div className="text-sm text-red-300">{error}</div>
+        ) : renders.length === 0 ? (
+          <div className="max-w-md tv-panel border tv-divider rounded-lg p-6 text-center mx-auto mt-10">
+            <div className="text-2xl mb-2">▣</div>
+            <div className="text-sm font-medium">No saved renders yet</div>
+            <div className="text-xs tv-muted mt-1.5">
+              Open Studio A, B or C in the designer, click <span className="tv-gold">◇ 3D Render</span>, then <span className="tv-gold">Save to Gallery</span>.
+            </div>
+          </div>
+        ) : (
+          <div className={classNames('grid gap-4', isMobile ? 'grid-cols-1' : 'grid-cols-2 lg:grid-cols-3 xl:grid-cols-4')}>
+            {renders.map(r => (
+              <button
+                key={r.id}
+                onClick={() => openRender(r)}
+                className="group text-left tv-panel border tv-divider rounded-lg overflow-hidden hover:border-[var(--tv-gold)] transition-colors"
+              >
+                <img src={r.thumb} alt={r.name} className="w-full aspect-[3/2] object-cover" />
+                <div className="p-3">
+                  <div className="text-xs font-medium truncate group-hover:text-[var(--tv-gold)] transition-colors">{r.name}</div>
+                  <div className="text-[10px] tv-muted mt-0.5">
+                    {new Date(r.createdAt).toLocaleString()}{r.preset ? ' · ' + r.preset : ''}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Full-screen viewer */}
+      {open && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-black/95">
+          <div className="flex items-center justify-between px-4 py-3 border-b tv-divider tv-panel flex-shrink-0">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold tv-gold truncate">{open.name}</div>
+              <div className="text-[11px] tv-muted truncate">
+                {new Date(open.createdAt).toLocaleString()}{open.summary ? ' · ' + open.summary : ''}
+              </div>
+            </div>
+            <button
+              onClick={() => setOpen(null)}
+              className="px-3 py-1.5 text-xs rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)] hover:text-white tv-muted flex-shrink-0 ml-3"
+            >✕ Close</button>
+          </div>
+          <div className="flex-1 flex items-center justify-center overflow-hidden p-4">
+            {!open.image ? (
+              <div className="w-8 h-8 rounded-full border-2 border-[var(--tv-gold)] border-t-transparent animate-spin" />
+            ) : open.image === 'error' ? (
+              <div className="text-sm text-red-300">Could not load the full image.</div>
+            ) : (
+              <img src={open.image} alt={open.name} className="max-w-full max-h-full object-contain rounded shadow-2xl" />
+            )}
+          </div>
+          <div className="flex items-center justify-center gap-2 px-4 py-3 border-t tv-divider tv-panel flex-shrink-0">
+            <button
+              onClick={() => removeRender(open)}
+              disabled={deleting}
+              className="px-3 py-2 text-xs rounded border tv-divider tv-panel-2 hover:border-red-400 hover:text-red-300 disabled:opacity-50"
+            >{deleting ? 'Deleting…' : '🗑 Delete'}</button>
+            <button
+              onClick={() => download(open)}
+              disabled={!open.image || open.image === 'error'}
+              className="px-4 py-2 text-xs rounded tv-gold-bg font-medium disabled:opacity-50"
+            >⬇ Download Image</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, onUpdateRoomLayout, onBackToFloorPlan, lockSpaceId, undoRef, onUndoState, canAIRender }) {
   const [spaceId, setSpaceId] = useState(lockSpaceId || currentEvent?.space || 'A');
   const space = getSpace(spaceId);
   const [items, setItems] = useState([]);
@@ -2983,6 +3836,9 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
   const [presetSeats, setPresetSeats] = useState(() =>
     Object.fromEntries(PRESETS.map(p => [p.id, p.max])));
   const [activePreset, setActivePreset] = useState(null);
+  // Admin AI photo render of the current layout (Studios A & C).
+  // null = closed, 'preview' | 'hd' = open in that render mode.
+  const [show3D, setShow3D] = useState(null);
 
   // Undo history: each discrete action (a drag, an add/delete, a preset, …)
   // pushes the prior items snapshot so Undo can step back one action at a time.
@@ -3069,6 +3925,21 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
   // the guest/client header can drive it.
   useEffect(() => { if (undoRef) undoRef.current = undo; return () => { if (undoRef) undoRef.current = null; }; });
   useEffect(() => { if (onUndoState) onUndoState(canUndo); }, [canUndo]);
+
+  // ⌘Z / Ctrl-Z undoes the last change. Ignored while typing in a field so it
+  // never fights the browser's native text undo.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (!(e.key === 'z' || e.key === 'Z') || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      const el = document.activeElement;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+      e.preventDefault();
+      undo();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line
+  }, []);
 
   // Build a preset's furniture for a seat target, capping each furniture type to
   // its available stock so a preset never places more than we own (e.g. only 6
@@ -3315,6 +4186,63 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
     setItems(prev => prev.map(it => selectedIds.includes(it.id) ? { ...it, rotation: ((it.rotation || 0) + 90) % 360 } : it));
   };
 
+  // Rotate the ENTIRE arrangement 90° clockwise as one rigid block: every
+  // item's center turns about the layout's own center and every item gains
+  // +90° of spin, so chairs keep facing their tables and the whole plan simply
+  // faces a different wall. The block is then slid back inside the room (and
+  // centered if it no longer fits). Each click advances another 90°.
+  const rotateLayout = () => {
+    setItems(prev => {
+      if (!prev.length) return prev;
+      // Displayed footprint of an item, accounting for the 90/270 swap.
+      const disp = (it) => {
+        const d = itemDims(it);
+        const sw = it.rotation === 90 || it.rotation === 270;
+        return { w: sw ? d.h : d.w, h: sw ? d.w : d.h };
+      };
+      // Pivot = center of the layout's bounding box.
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      prev.forEach(it => {
+        const { w, h } = disp(it);
+        minX = Math.min(minX, it.xFt); minY = Math.min(minY, it.yFt);
+        maxX = Math.max(maxX, it.xFt + w); maxY = Math.max(maxY, it.yFt + h);
+      });
+      const px = (minX + maxX) / 2, py = (minY + maxY) / 2;
+      // Turn each center 90° clockwise about the pivot: (dx,dy) → (-dy,dx).
+      let nMinX = Infinity, nMinY = Infinity, nMaxX = -Infinity, nMaxY = -Infinity;
+      const rotated = prev.map(it => {
+        const { w, h } = disp(it);
+        const cx = it.xFt + w / 2, cy = it.yFt + h / 2;
+        const dx = cx - px, dy = cy - py;
+        const ncx = px - dy, ncy = py + dx;
+        const nrot = ((it.rotation || 0) + 90) % 360;
+        const nsw = nrot === 90 || nrot === 270;
+        const d = itemDims(it);
+        const nw = nsw ? d.h : d.w, nh = nsw ? d.w : d.h;
+        const nx = ncx - nw / 2, ny = ncy - nh / 2;
+        nMinX = Math.min(nMinX, nx); nMinY = Math.min(nMinY, ny);
+        nMaxX = Math.max(nMaxX, nx + nw); nMaxY = Math.max(nMaxY, ny + nh);
+        return { ...it, xFt: nx, yFt: ny, rotation: nrot };
+      });
+      // Slide the rotated block back inside the room; if it's now larger than
+      // the room on an axis, center the overflow instead of jamming one wall.
+      const fit = (lo, hi, size) => {
+        const span = hi - lo;
+        if (span <= size) {
+          let s = 0;
+          if (lo < 0) s = -lo;
+          if (hi + s > size) s = size - hi;
+          return s;
+        }
+        return (size - span) / 2 - lo;
+      };
+      const sx = fit(nMinX, nMaxX, space.widthFt);
+      const sy = fit(nMinY, nMaxY, space.depthFt);
+      return rotated.map(it => ({ ...it, xFt: it.xFt + sx, yFt: it.yFt + sy }));
+    });
+    setSelectedIds([]);
+  };
+
   const selectAll = () => setSelectedIds(items.map(it => it.id));
 
   const clearAll = () => {
@@ -3346,49 +4274,8 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
     const n = (v) => Number(v).toFixed(1);
     const wFt = space.widthFt, dFt = space.depthFt;
     const PPF = 760 / Math.max(wFt, dFt); // px per foot — longer side ≈ 760px
-    const W = wFt * PPF, H = dFt * PPF;
-
-    // 5-ft reference grid (faint) so crews can eyeball distances.
-    let grid = '';
-    for (let gx = 5; gx < wFt; gx += 5) grid += `<line x1="${n(gx * PPF)}" y1="0" x2="${n(gx * PPF)}" y2="${n(H)}" stroke="#eceff3" stroke-width="1"/>`;
-    for (let gy = 5; gy < dFt; gy += 5) grid += `<line x1="0" y1="${n(gy * PPF)}" x2="${n(W)}" y2="${n(gy * PPF)}" stroke="#eceff3" stroke-width="1"/>`;
-
-    // Fixtures (stage, doors) drawn beneath furniture.
-    const fixtures = (space.fixtures || []).map(fx => {
-      const x = fx.x * PPF, y = fx.y * PPF, w = fx.w * PPF, h = fx.h * PPF;
-      if (fx.type === 'stage') {
-        return `<rect x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}" fill="#1f2937" stroke="#111827" stroke-width="1.5"/>`
-          + `<text x="${n(x + w / 2)}" y="${n(y + h / 2)}" text-anchor="middle" dominant-baseline="central" fill="#ffffff" font-size="11" font-weight="600">STAGE</text>`;
-      }
-      return `<rect x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}" fill="#ffffff" stroke="#9aa3b2" stroke-width="1.5" stroke-dasharray="4 2"/>`;
-    }).join('');
-
-    // Furniture shapes.
-    const shapes = items.map(it => {
-      const f = FURN_BY_ID[it.furnId];
-      if (!f) return '';
-      const swap = it.rotation === 90 || it.rotation === 270;
-      const dims = itemDims(it);
-      const fw = (swap ? dims.h : dims.w) * PPF;
-      const fh = (swap ? dims.w : dims.h) * PPF;
-      const x = it.xFt * PPF, y = it.yFt * PPF;
-      if (f.type === 'drape') {
-        if (fw >= fh) {
-          const cy = y + fh / 2;
-          return `<line x1="${n(x)}" y1="${n(cy)}" x2="${n(x + fw)}" y2="${n(cy)}" stroke="#6b21a8" stroke-width="3" stroke-linecap="round"/>`;
-        }
-        const cx = x + fw / 2;
-        return `<line x1="${n(cx)}" y1="${n(y)}" x2="${n(cx)}" y2="${n(y + fh)}" stroke="#6b21a8" stroke-width="3" stroke-linecap="round"/>`;
-      }
-      if (f.type === 'chair') {
-        return `<rect x="${n(x)}" y="${n(y)}" width="${n(fw)}" height="${n(fh)}" rx="1.5" fill="#aab4c8" stroke="#5b6679" stroke-width="0.8"/>`;
-      }
-      const label = f.capacity > 0 ? `<text x="${n(x + fw / 2)}" y="${n(y + fh / 2)}" text-anchor="middle" dominant-baseline="central" fill="#2b3445" font-size="9" font-weight="600">${f.capacity}</text>` : '';
-      if (f.shape === 'circle') {
-        return `<circle cx="${n(x + fw / 2)}" cy="${n(y + fh / 2)}" r="${n(fw / 2)}" fill="#e6ebf2" stroke="#2b3445" stroke-width="1.2"/>` + label;
-      }
-      return `<rect x="${n(x)}" y="${n(y)}" width="${n(fw)}" height="${n(fh)}" rx="2" fill="#e6ebf2" stroke="#2b3445" stroke-width="1.2"/>` + label;
-    }).join('');
+    // Grid, fixtures, and furniture markup shared with the AI render snapshot.
+    const { grid, fixtures, shapes, W, H } = buildPlanSvgParts(space, items, PPF);
 
     // Counts legend.
     const counts = {};
@@ -3558,6 +4445,13 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
             );
           })}
         </div>
+        {items.length > 0 && (
+          <button onClick={rotateLayout}
+            title="Turn the whole arrangement 90° — chairs, tables and all — to face a different wall. Click again for another 90°."
+            className="mt-3 w-full px-3 py-2 text-xs tv-panel-2 border tv-divider rounded hover:border-[var(--tv-gold)] hover:text-[var(--tv-gold)] transition-colors flex items-center justify-center gap-2">
+            <span>⟳</span> Rotate layout 90°
+          </button>
+        )}
       </div>
     </div>
   );
@@ -3755,6 +4649,19 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
     </div>
   );
 
+  // Studio C's AI render overlay (shared by mobile + desktop layouts)
+  const aiRenderAllowed = canAIRender && (spaceId === 'C' || spaceId === 'B' || spaceId === 'A');
+  const render3D = show3D && aiRenderAllowed ? (
+    <StudioCRender
+      items={items}
+      space={space}
+      spaceId={spaceId}
+      initialMode={show3D}
+      presetName={(PRESETS.find(p => p.id === activePreset) || {}).label || null}
+      onClose={() => setShow3D(null)}
+    />
+  ) : null;
+
   // ====== MOBILE LAYOUT ======
   if (isMobile) {
     const TAB_LABELS = { setup: 'Setup', items: 'Items', props: 'Props' };
@@ -3769,8 +4676,15 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
           {projectMode && onBackToFloorPlan && (
             <button onClick={onBackToFloorPlan} className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 flex-shrink-0">⌂ Floor Plan</button>
           )}
+          <button onClick={undo} disabled={!canUndo} title="Undo last change (⌘Z)" className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 flex-shrink-0 hover:border-[var(--tv-gold)] disabled:opacity-40 disabled:cursor-not-allowed">↶ Undo</button>
           <button onClick={clearAll} className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 flex-shrink-0">Clear</button>
           <button onClick={exportPdf} className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 flex-shrink-0">Export PDF</button>
+          {aiRenderAllowed && (
+            <>
+              <button onClick={() => setShow3D('preview')} title="Quick preview render — faster & cheaper, approximate layout (medium quality, 1536×1024)" className="px-2.5 py-1.5 text-xs rounded border tv-divider tv-panel-2 flex-shrink-0 tv-gold hover:border-[var(--tv-gold)]">◇ Preview Render</button>
+              <button onClick={() => setShow3D('hd')} title="Final HD render — strict layout accuracy + best image quality (high, 2048×1152). Uses the layout snapshot, JSON blueprint and empty-room reference. Costs more, ~1–3 min." className="px-2.5 py-1.5 text-xs rounded border border-[var(--tv-gold)]/60 tv-panel-2 flex-shrink-0 tv-gold hover:border-[var(--tv-gold)]">✦ Final HD Render</button>
+            </>
+          )}
           <button onClick={handleSave} className="px-3 py-1.5 text-xs tv-gold-bg font-medium rounded flex-shrink-0 ml-auto">
             {showSaved ? '✓ Saved' : 'Save'}
           </button>
@@ -3812,6 +4726,8 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
             </div>
           </div>
         )}
+
+        {render3D}
       </div>
     );
   }
@@ -3827,8 +4743,15 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
             {projectMode && onBackToFloorPlan && (
               <button onClick={onBackToFloorPlan} className="px-3 py-2 text-sm rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)]">⌂ View Floor Plan</button>
             )}
+            <button onClick={undo} disabled={!canUndo} title="Undo last change (⌘Z)" className="px-3 py-2 text-sm rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)] disabled:opacity-40 disabled:cursor-not-allowed">↶ Undo</button>
             <button onClick={clearAll} className="px-3 py-2 text-sm rounded border tv-divider tv-panel-2 hover:border-red-400 hover:text-red-300">Clear</button>
             <button onClick={exportPdf} className="px-3 py-2 text-sm rounded border tv-divider tv-panel-2 hover:border-[var(--tv-gold)]">Export PDF</button>
+            {aiRenderAllowed && (
+              <>
+                <button onClick={() => setShow3D('preview')} title="Quick preview render — faster & cheaper, approximate layout (medium quality, 1536×1024)" className="px-3 py-2 text-sm rounded border tv-divider tv-panel-2 tv-gold hover:border-[var(--tv-gold)]">◇ Preview Render</button>
+                <button onClick={() => setShow3D('hd')} title="Final HD render — strict layout accuracy + best image quality (high, 2048×1152). Uses the layout snapshot, JSON blueprint and empty-room reference. Costs more, ~1–3 min." className="px-3 py-2 text-sm rounded border border-[var(--tv-gold)]/60 tv-panel-2 tv-gold hover:border-[var(--tv-gold)]">✦ Final HD Render</button>
+              </>
+            )}
             <button onClick={handleSave} className="px-4 py-2 text-sm tv-gold-bg font-medium rounded">
               {showSaved ? '✓ Saved' : 'Save Layout'}
             </button>
@@ -3853,6 +4776,8 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
           {renderPropsPanel()}
         </div>
       </div>
+
+      {render3D}
     </div>
   );
 }
@@ -4125,6 +5050,12 @@ const api = {
   createEvent(body) { return this._req('/api/events', { method: 'POST', body: JSON.stringify(body) }); },
   archiveEvent(id, archived) { return this._req('/api/events/' + id, { method: 'PATCH', body: JSON.stringify({ archived }) }); },
   deleteEvent(id) { return this._req('/api/events/' + id, { method: 'DELETE' }); },
+  renderStudioC(body) { return this._req('/api/render-studio-c', { method: 'POST', body: JSON.stringify(body) }); },
+  studioAngles(spaceId) { return this._req('/api/studio-angles/' + spaceId); },
+  saveRender(body) { return this._req('/api/renders', { method: 'POST', body: JSON.stringify(body) }); },
+  listRenders() { return this._req('/api/renders'); },
+  getRender(id) { return this._req('/api/renders/' + id); },
+  deleteRender(id) { return this._req('/api/renders/' + id, { method: 'DELETE' }); },
 };
 
 function FullScreen({ children }) {
@@ -4213,7 +5144,7 @@ function LoginScreen({ onAuthed }) {
 
 // Single-layout editor: wraps the Designer with autosave to the backend.
 // Reused by the guest app and the admin client-layouts view.
-function LayoutEditor({ layout, isMobile, onSaved, onStatus, readOnly, flushRef, undoRef, onUndoState }) {
+function LayoutEditor({ layout, isMobile, onSaved, onStatus, readOnly, flushRef, undoRef, onUndoState, canAIRender }) {
   const timer = useRef(null);
   const latest = useRef(layout.data || []);
 
@@ -4281,6 +5212,7 @@ function LayoutEditor({ layout, isMobile, onSaved, onStatus, readOnly, flushRef,
       lockSpaceId={layout.spaceId}
       undoRef={undoRef}
       onUndoState={onUndoState}
+      canAIRender={canAIRender}
     />
   );
 }
@@ -4618,7 +5550,7 @@ function AdminClients({ isMobile }) {
           <div className="ml-auto"><SaveStatus status={status} /></div>
         </div>
         <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-          <LayoutEditor layout={editing} isMobile={isMobile} onSaved={patchInList} onStatus={setStatus} />
+          <LayoutEditor layout={editing} isMobile={isMobile} onSaved={patchInList} onStatus={setStatus} canAIRender />
         </div>
       </div>
     );
@@ -4879,6 +5811,7 @@ function App({ user, onLogout }) {
     venue: 'Venue Layout',
     designer: 'Layout Designer',
     clients: 'Client Layouts',
+    gallery: 'Render Gallery',
     events: 'Events',
     eventlayout: 'Event Layout',
     inventory: 'Inventory',
@@ -4952,9 +5885,11 @@ function App({ user, onLogout }) {
               activeProject={activeProject}
               onUpdateRoomLayout={updateRoomLayout}
               onBackToFloorPlan={() => setView('floorplan')}
+              canAIRender={user.role === 'admin'}
             />
           )}
           {view === 'clients' && <AdminClients isMobile={isMobile} />}
+          {view === 'gallery' && <RenderGallery isMobile={isMobile} />}
           {view === 'events' && <EventsScreen events={events} onOpenEvent={openEvent} onCreated={addEvent} onArchive={setEventArchived} onDelete={removeEvent} isMobile={isMobile} />}
           {view === 'eventlayout' && openLayout && (
             <div className="flex-1 flex flex-col min-h-0">
@@ -4970,7 +5905,7 @@ function App({ user, onLogout }) {
                 <div className="ml-auto"><SaveStatus status={eventLayoutStatus} /></div>
               </div>
               <div className="flex-1 min-h-0 flex flex-col">
-                <LayoutEditor key={openLayout.id} layout={openLayout} isMobile={isMobile} onSaved={setOpenLayout} onStatus={setEventLayoutStatus} readOnly={false} />
+                <LayoutEditor key={openLayout.id} layout={openLayout} isMobile={isMobile} onSaved={setOpenLayout} onStatus={setEventLayoutStatus} readOnly={false} canAIRender />
               </div>
             </div>
           )}
