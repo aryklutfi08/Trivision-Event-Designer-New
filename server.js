@@ -612,20 +612,118 @@ const presentationStyle = (decor) =>
   + 'MORE than making the image look full, symmetric, or fancy — an exact, sparse-looking room is correct; an embellished one '
   + 'is wrong.'
   + (decor
-    ? '\n\nBEAUTIFICATION (requested by the client — the furniture rules above still override everything): make the scene '
-      + 'gorgeous, upscale and event-ready while staying photorealistic. Add ALL of the following:\n'
+    ? '\n\nBEAUTIFICATION (requested by the client — the layout rules above still override everything): make the scene gorgeous, '
+      + 'upscale and event-ready while staying photorealistic, using ONLY these two additions:\n'
       + '• AESTHETIC LIGHTING — a warm, inviting ambient glow; cinematic uplighting washing the walls and drapes; soft pools of '
       + 'light on the floor; gentle highlights on the linens.\n'
-      + '• CHANDELIERS — elegant crystal or champagne-gold chandeliers hanging from the ceiling structure/truss, spaced evenly '
-      + 'over the room and glowing warmly.\n'
-      + '• ROUND RUGS — a round black-and-gold patterned area rug centered UNDER EACH round table, slightly wider than the '
-      + 'table so it frames the chairs\' front legs.\n'
-      + '• GREENERY — tall potted plants (palms, ficus or olive trees) in the corners, along the walls and flanking the stage '
-      + 'or entrance, plus subtle floral accents and champagne-gold décor details.\n'
-      + 'STRICT placement rules: these additions live on the CEILING, the WALLS, the room\'s EDGES/CORNERS, or flat UNDER '
-      + 'existing furniture (rugs). They must never move, add, remove, crowd, or replace any table or chair; never block '
-      + 'aisles, walkways, or sightlines to the stage. Furniture counts and positions from the manifest stay exact.'
+      + '• CEILING CHANDELIERS — elegant crystal or champagne-gold chandeliers hanging from the ceiling structure/truss, glowing '
+      + 'warmly, plus tall potted greenery standing flat against the WALLS and in the room\'s CORNERS only.\n'
+      + 'HARD LIMITS — accuracy wins over decoration: everything you add lives on the CEILING or against the WALLS/CORNERS. Add '
+      + 'NOTHING on the open floor and NOTHING under, between, beside or on top of any table or chair — specifically no rugs, no '
+      + 'dance floor, no platforms, no risers, no plants, no lamps, no props and no decorations placed among the furniture. Any '
+      + 'open floor area (aisles, walkways, the empty centre of a U-shape) must remain bare floor. Never move, add, remove, crowd '
+      + 'or replace a table or chair; never block sightlines to the stage.'
     : '');
+
+// ---- Render validation ----------------------------------------------------
+// Derive, straight from the layout, what the finished photo MUST show. All of
+// this is deterministic — only the "does the photo actually show it" question
+// needs a vision call.
+function layoutExpectations(m) {
+  if (!m || !Array.isArray(m.objects) || !m.objects.length) return null;
+  const objs = m.objects.filter(o => o && typeof o.type === 'string');
+  const isChair = (o) => /chair/i.test(o.type);
+  const isTable = (o) => /table/i.test(o.type);
+  const tables = objs.filter(isTable);
+  const chairs = objs.filter(isChair);
+  if (!tables.length) return null;
+
+  // Is there a genuinely large open area in the middle of the furniture (the
+  // hallmark of a U-shape/horseshoe)? Measure the gap from the furniture's
+  // centroid-of-bbox to the nearest piece, relative to the layout's size.
+  const xs = tables.map(o => o.xFt), ys = tables.map(o => o.yFt);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const span = Math.max(maxX - minX, maxY - minY) || 1;
+  let nearest = Infinity;
+  objs.forEach(o => { nearest = Math.min(nearest, Math.hypot(o.xFt - cx, o.yFt - cy)); });
+  // Open centre if nothing sits within ~22% of the layout's span of the middle.
+  const centreOpen = nearest > span * 0.22;
+
+  // Foreground tables — the ones a tight/cropped render tends to drop first.
+  // Each object's `zone` string ("foreground/near camera, left" etc.) already
+  // uses the SAME unified photo frame as the layout guide's camera, so no
+  // extra coordinate math is needed here.
+  const foregroundTables = tables.filter(o => typeof o.zone === 'string' && o.zone.includes('foreground'));
+  return {
+    tables: tables.length,
+    chairs: chairs.length,
+    chairsPerTable: tables.length ? +(chairs.length / tables.length).toFixed(1) : 0,
+    centreOpen,
+    foregroundTables: foregroundTables.length,
+  };
+}
+
+// Ask a vision model whether the produced photo still matches the locked
+// layout. Best-effort and FAIL-OPEN: any error/uncertainty accepts the image,
+// because wrongly rejecting a good render costs the user another paid call.
+const VALIDATE_MODEL = process.env.RENDER_VALIDATE_MODEL || 'gpt-4o-mini';
+async function validateRender(dataUrl, exp) {
+  if (!exp || process.env.RENDER_VALIDATE === 'off') return { ok: true, skipped: true };
+  const ask = 'You are checking whether an event-venue photo matches a required floor plan. '
+    + 'Count ONLY what is clearly visible. Reply with strict JSON, no prose: '
+    + '{"tables": <int>, "chairs": <int>, "centreOpen": <true|false>, "foregroundTables": <int>}. '
+    + '"tables" = round/rect dining tables. "chairs" = individual chairs. '
+    + '"centreOpen" = true if the middle of the seating arrangement is open, empty floor (no furniture in it). '
+    + '"foregroundTables" = how many DISTINCT tables sit in the foreground — the nearest third of the room to the camera, '
+    + 'closest to the bottom of the frame (this includes any table that is only partially in frame, cropped by the bottom or side '
+    + 'edge, or overlapping the very front of the image — those still count as present).';
+  try {
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: VALIDATE_MODEL,
+        messages: [{ role: 'user', content: [
+          { type: 'text', text: ask },
+          { type: 'image_url', image_url: { url: dataUrl } },
+        ] }],
+        max_tokens: 100,
+      }),
+    });
+    if (!r.ok) return { ok: true, skipped: true, reason: 'validator http ' + r.status };
+    const body = await r.json();
+    const txt = ((body.choices || [])[0] || {}).message?.content || '';
+    const json = JSON.parse((txt.match(/\{[\s\S]*\}/) || ['{}'])[0]);
+    const seenTables = Number(json.tables);
+    if (!Number.isFinite(seenTables)) return { ok: true, skipped: true, reason: 'validator gave no count' };
+
+    // Tolerant thresholds: perspective hides some pieces, so only a GROSS
+    // mismatch counts as "the structure changed".
+    const problems = [];
+    const tableLo = Math.floor(exp.tables * 0.7), tableHi = Math.ceil(exp.tables * 1.3);
+    if (seenTables < tableLo || seenTables > tableHi) {
+      problems.push(`saw ~${seenTables} tables, layout has ${exp.tables}`);
+    }
+    if (exp.centreOpen && json.centreOpen === false) {
+      problems.push('the open centre of the layout was filled in');
+    }
+    // Foreground tables are the ones most likely to be cropped/dropped by too
+    // tight a frame. No tolerance band here (unlike the overall table count):
+    // if the layout has ANY foreground tables, the photo must show them.
+    if (exp.foregroundTables > 0) {
+      const seenFg = Number(json.foregroundTables);
+      if (Number.isFinite(seenFg) && seenFg < exp.foregroundTables) {
+        problems.push(`layout has ${exp.foregroundTables} foreground table(s) (front-left/front-right, nearest the camera), `
+          + `but only ~${seenFg} are visible in the render — a front table was likely dropped or cropped out`);
+      }
+    }
+    return { ok: problems.length === 0, problems, seen: json, expected: exp };
+  } catch (e) {
+    return { ok: true, skipped: true, reason: 'validator error: ' + e.message };
+  }
+}
 
 // Turn the client layout manifest into a compact, explicit text block so the
 // image model places each object at its exact plan coordinate. Validated
@@ -882,71 +980,82 @@ app.post('/api/render-studio-c', async (req, res) => {
       })
       .filter(Boolean);
 
-    // Attached-image order (drives the "Image N" citations): 1 = empty room,
-    // then the perspective guide, then the top-down plan, then furniture refs,
-    // then extra room refs.
-    let imgN = 1;
+    // Attached-image order (drives the "Image N" citations). When a layout
+    // guide exists it is FIRST — /images/edits treats the first image as the
+    // one being edited, so the render becomes a realism pass over locked
+    // geometry instead of rebuilding the room from a description. The empty
+    // room photo follows as the architecture/materials reference.
+    let imgN = 0;
     const guideIdx = guideBuf ? ++imgN : 0;
+    const roomIdx = ++imgN;
     const planIdx = planBuf ? ++imgN : 0;
     const firstFurnIdx = imgN + 1;
-    const ord = { 2: 'SECOND', 3: 'THIRD', 4: 'FOURTH' };
+    const ord = { 1: 'FIRST', 2: 'SECOND', 3: 'THIRD', 4: 'FOURTH' };
 
-    const prompt = [
+    const prompt = guideBuf ? [
+      // ── IMAGE-TO-IMAGE ENHANCEMENT (layout-lock) ───────────────────────
       `Photorealistic interior photograph of "${studio.name}", a real event venue room.`,
-      'This is a strict photorealistic conversion of the submitted 3D layout, not a creative redesign. Preserve all furniture '
-      + 'exactly as shown — exact count, exact position, exact orientation. Do not add tables, do not add chairs, and do not '
-      + 'rearrange anything.',
-      'The FIRST image is the actual empty room. Preserve its architecture, camera angle, and finishes EXACTLY:',
-      // A chosen angle may carry its own viewpoint-specific description (what
-      // is foreground vs background changes with the camera position).
+      'TASK: this is an IMAGE ENHANCEMENT of the FIRST image, not a new picture. The FIRST image is an exact 3D render of the '
+      + 'client\'s real floor plan, taken from the exact camera angle required. Keep it as-is geometrically and repaint it as a '
+      + 'photograph.',
+      'Treat the supplied layout image as locked geometry. Preserve every visible table, chair, aisle, and open area exactly. Do '
+      + 'not remove, crop out, simplify, or relocate any furniture, especially foreground tables near the camera. Keep all '
+      + 'front-most tables fully represented in the final image. Only improve realism, lighting, materials, drapery, and '
+      + 'ambience.',
+      'FOREGROUND IS NOT EXPENDABLE: the furniture nearest the camera — including any table at the front-left or front-right of '
+      + 'the frame, and any table whose edge sits close to the bottom of the image — is exactly as important as furniture farther '
+      + 'away. A tighter, "cleaner" crop that pushes a near-camera table out of frame, shrinks it into the edge, or quietly drops '
+      + 'it is WRONG even if the result looks more polished. Every table and chair visible anywhere in the FIRST image, from the '
+      + 'nearest foreground piece to the farthest background piece, must still be visible, in the same relative position, in the '
+      + 'final photo.',
+      'Concretely, in the FIRST image every dark cylinder is a round banquet table already wearing a floor-length linen, and every '
+      + 'dark block is a chair (its taller panel is the seat back, so the chair faces AWAY from that panel). Turn each one into a '
+      + 'photorealistic dressed table / real chair IN PLACE — same centre point, same spacing, same rotation, same size, same '
+      + 'distance to the stage and to its neighbours. Do NOT nudge anything to look tidier or more symmetric, and do NOT tighten '
+      + 'the composition in a way that trims any table out of the shot.',
+      'HARD RULES: do not add, remove, duplicate, relocate, rotate or resize any furniture. Do not fill open floor. Any large empty '
+      + 'area in the FIRST image (for example the open centre of a U-shape/horseshoe) MUST stay completely empty — no extra tables, '
+      + 'no dance floor, no platform, no rugs, no plants, no lamps, no props, no decorations under or between the furniture. If the '
+      + 'FIRST image shows a wide gap or aisle, the final photo shows that same wide gap. Do not re-space the arrangement to look '
+      + 'more evenly distributed.',
+      `The ${ord[roomIdx] || ('#' + roomIdx)} image is a photo of this same room EMPTY. Use it ONLY as the reference for the room's `
+      + 'architecture, walls, ceiling, floor finish, fixtures and overall lighting mood — repaint the FIRST image\'s surroundings '
+      + 'to match this real room. Do NOT adopt its camera angle or copy furniture from it; the FIRST image already defines the '
+      + 'viewpoint and every object\'s position. The room is:',
       (chosenAngle && chosenAngle.description) || studio.description,
-      'Do not change the room\'s structure, dimensions, wall/ceiling positions, or camera perspective in any way. Tasteful '
-      + 'decorative enhancements described below may be layered ONTO this architecture, but the underlying room must remain '
-      + 'recognizably this exact room.',
-      guideBuf
-        ? `The ${ord[guideIdx] || ('#' + guideIdx)} image is a LAYOUT GUIDE — a clean 3D render of THIS exact layout from the `
-          + 'SAME camera angle as the room photo. Blue cylinders/boxes are tables, orange blocks are chairs (the small light bar '
-          + 'marks the front/facing side of each chair), and the dark slab with the red panel is the stage/LED wall. '
-          + 'USE THIS GUIDE AS THE STRICT PLACEMENT MAP: match the exact furniture positions, spacing, table arrangement, chair '
-          + 'groupings, rows, and stage location from the guide. Use the empty-room photo ONLY for the room architecture, '
-          + 'materials and camera perspective. Improve realism, lighting, materials, greenery and décor, but do NOT move, add, or '
-          + 'remove any furniture relative to the guide — every blue block becomes a real dressed table in the same spot, every '
-          + 'orange block becomes a real chair in the same spot facing the same way.'
-        : '',
       planBuf
-        ? `The ${ord[planIdx] || ('#' + planIdx)} image is a to-scale top-down 2D floor plan of the same layout, drawn from the SAME viewpoint as the `
-          + `room photo (room ${w} ft wide × ${d} ft deep, with a 5 ft grid). It CONFIRMS the guide from directly overhead — the single source of `
-          + 'truth for how many pieces there are and where each one sits. Reproduce the arrangement it shows EXACTLY: the same '
-          + 'number of tables, in the same grid/rows/clusters, with the same spacing, gaps, aisles and empty areas. Do NOT '
-          + 'substitute a generic, evenly-spaced, or "typical" banquet arrangement, and do NOT slide furniture together to fill '
-          + 'space — if the plan shows 4 tables across and 5 deep with wide gaps, the render shows exactly that. Each round table is '
-          + 'drawn as a numbered circle; match every numbered table to its position. '
-          + 'COORDINATE SYSTEM — read the plan literally, do NOT rotate or mirror it: '
-          + 'the BOTTOM of the plan is nearest the camera (foreground); the TOP of the plan is the far wall (background); the LEFT of '
-          + 'the plan is the LEFT of the photo and the RIGHT is the RIGHT. In the manifest below, x runs 0 (left) to ' + w + ' ft '
-          + '(right) and y runs 0 (far wall) to ' + d + ' ft (nearest the camera): a LARGER y means CLOSER to the camera, a SMALLER '
-          + 'y means farther away. Each chair/seat in the plan carries a small dark triangle on its front edge that points in the '
-          + 'exact direction that seat faces — orient every chair in the render to match its triangle (and the FACING notes below).'
+        ? `The ${ord[planIdx] || ('#' + planIdx)} image is the same layout seen from directly overhead — use it only to confirm the `
+          + 'arrangement (counts, spacing, aisles, open areas). It must not change what the FIRST image already fixes.'
         : '',
+    ] : [
+      // ── EMPTY-ROOM RENDER (no furniture placed → nothing to lock) ──────
+      `Photorealistic interior photograph of "${studio.name}", a real event venue room.`,
+      'The FIRST image is the actual empty room. Preserve its architecture, camera angle, and finishes EXACTLY:',
+      (chosenAngle && chosenAngle.description) || studio.description,
+      'Do not change the room\'s structure, dimensions, wall/ceiling positions, or camera perspective in any way.',
+    ];
+
+    prompt.push(
       manifestText,
       layoutJsonText,
       manifestText
-        ? `Use the layout guide${planBuf ? ' image, the top-down plan' : ''} and the STRUCTURED LAYOUT JSON as the STRICT SOURCE OF TRUTH for placement. `
-          + 'The final render may improve materials, lighting, greenery, and realism, but must preserve the number, position, '
-          + 'spacing, and arrangement of all furniture.'
+        ? (guideBuf
+            ? 'The STRUCTURED LAYOUT JSON below is a cross-check only — the FIRST image already fixes every position. Use the JSON '
+              + 'to confirm counts and groupings, never to re-derive placement.'
+            : 'Use the STRUCTURED LAYOUT JSON as the STRICT SOURCE OF TRUTH for placement. The final render may improve materials, '
+              + 'lighting, greenery, and realism, but must preserve the number, position, spacing, and arrangement of all furniture.')
         : '',
       strictLayout && manifestText
-        ? `STRICT LAYOUT ACCURACY MODE: treat the layout guide${planBuf ? ' + plan' : ''} + JSON as a precise spatial blueprint. Cross-check every table and `
-          + 'chair against the guide and its JSON coordinate; the grid, row counts, spacing, aisles, chair groupings and stage position must match '
-          + 'the blueprint, not a stylized approximation. When realism and blueprint accuracy conflict, accuracy wins.'
+        ? 'STRICT LAYOUT ACCURACY MODE: cross-check every table and chair against the locked geometry and its JSON coordinate; the '
+          + 'row counts, spacing, aisles, chair groupings, open areas and stage position must match the blueprint, not a stylized '
+          + 'approximation. When realism and blueprint accuracy conflict, accuracy wins.'
         : '',
       manifestText
-        ? 'EXACT LAYOUT PRESERVATION (highest priority — this overrides aesthetics): Place every object from the manifest at its '
-          + 'given x/y center. Do NOT invent, add, duplicate, remove, merge, or omit any furniture — the final furniture count must '
-          + 'equal the manifest total. Do NOT move, rotate, or rearrange furniture to look nicer, more symmetric, or more balanced. '
-          + 'Preserve every object\'s position, the spacing and gaps between objects, and each object\'s distance to the walls and to '
-          + 'the front/stage. Chairs listed as standalone stay separate and free-standing; chairs listed around a table stay around '
-          + 'exactly that table. If in doubt, match the floor-plan image and the manifest, never your own sense of arrangement.'
+        ? 'EXACT LAYOUT PRESERVATION (highest priority — this overrides aesthetics): Do NOT invent, add, duplicate, remove, merge, or '
+          + 'omit any furniture — the final furniture count must equal the manifest total. Do NOT move, rotate, or rearrange furniture '
+          + 'to look nicer, more symmetric, or more balanced. Preserve every object\'s position, the spacing and gaps between objects, '
+          + 'and each object\'s distance to the walls and to the front/stage. Chairs listed as standalone stay separate and '
+          + 'free-standing; chairs listed around a table stay around exactly that table.'
         : '',
       manifestText
         ? 'CHAIR ORIENTATION (keep positions unchanged — only make facing correct): every chair must face the exact direction given by '
@@ -981,8 +1090,9 @@ app.post('/api/render-studio-c', async (req, res) => {
       finalCountCheck,
       'The result must look like a professional, realistic event-venue photograph',
       'of this exact room fully set up for an event. No people. Do not add any text, signage, lettering, logos, or watermarks',
-      'anywhere in the image — not on walls, not on the floor, nowhere.',
-    ].filter(Boolean).join('\n\n');
+      'anywhere in the image — not on walls, not on the floor, nowhere.'
+    );
+    const promptText = prompt.filter(Boolean).join('\n\n');
 
     const mode = (req.body || {}).mode === 'hd' ? 'hd' : 'preview';
     const modeCfg = RENDER_MODES[mode];
@@ -995,7 +1105,7 @@ app.post('/api/render-studio-c', async (req, res) => {
       const objCount = manifest && Array.isArray(manifest.objects) ? manifest.objects.length : 0;
       console.log('\n' + '='.repeat(70));
       console.log(`[render ${spaceId}/${mode}] angle: ${chosenAngle ? chosenAngle.id : 'default'} · base: ${path.basename(roomRef.path)} · ${objCount} object(s) · guide: ${guideBuf ? 'yes' : 'no'} · plan image: ${planBuf ? 'yes' : 'no'} · furniture refs: ${furnRefs.length} · extra room refs: ${extraRoomRefs.length}`);
-      console.log('-'.repeat(70) + '\nPROMPT:\n' + prompt);
+      console.log('-'.repeat(70) + '\nPROMPT:\n' + promptText);
       if (manifest) {
         console.log('-'.repeat(70) + '\nMANIFEST (raw objects with coordinates):');
         console.log(JSON.stringify(manifest.objects, null, 2));
@@ -1007,22 +1117,35 @@ app.post('/api/render-studio-c', async (req, res) => {
     // degrade once per knob and retry, so gpt-image-2 / 2048x1152 configs
     // keep working on accounts that only have gpt-image-1 today.
     const attempt = { model: IMAGE_MODEL, size: modeCfg.size, quality: modeCfg.quality, sendFormat: true, sendFidelity: true };
-    let out = null;
+    const mimeExt = IMAGE_FORMAT === 'jpeg' ? 'jpeg' : IMAGE_FORMAT === 'webp' ? 'webp' : 'png';
+    // Validate the finished photo against the layout and, if the furniture
+    // structure came back substantially wrong, regenerate ONCE. Capped at one
+    // retry: each pass is a paid call, and the validator is deliberately
+    // fail-open so a shaky count never blocks a good image.
+    const expectations = layoutExpectations(manifest);
+    const maxPasses = (expectations && process.env.RENDER_VALIDATE !== 'off') ? 2 : 1;
+    let b64 = null, validation = null;
     let lastMsg = 'The image service rejected the request.';
+    for (let pass = 0; pass < maxPasses; pass++) {
+    let out = null;
     for (let tries = 0; tries < 5; tries++) {
       const form = new FormData();
       form.append('model', attempt.model);
-      form.append('prompt', prompt);
+      form.append('prompt', promptText);
       form.append('size', attempt.size);
       form.append('quality', attempt.quality);
       if (attempt.sendFormat) form.append('output_format', IMAGE_FORMAT);
       // keep the real room's look intact (gpt-image-2 rejects this param)
       if (attempt.sendFidelity) form.append('input_fidelity', 'high');
-      form.append('image[]', new Blob([fs.readFileSync(roomRef.path)], { type: roomRef.mime }), path.basename(roomRef.path));
-      // Order MUST match the "Image N" numbering: guide, then top-down plan.
+      // Order MUST match the "Image N" numbering above. The layout guide goes
+      // FIRST when present: /images/edits edits the first image, so the render
+      // becomes a realism pass over locked geometry rather than rebuilding the
+      // room from a description. The empty-room photo follows as the
+      // architecture/materials reference.
       if (guideBuf) {
         form.append('image[]', new Blob([guideBuf], { type: 'image/png' }), 'layout-guide.png');
       }
+      form.append('image[]', new Blob([fs.readFileSync(roomRef.path)], { type: roomRef.mime }), path.basename(roomRef.path));
       if (planBuf) {
         form.append('image[]', new Blob([planBuf], { type: 'image/png' }), 'floor-plan.png');
       }
@@ -1067,14 +1190,31 @@ app.post('/api/render-studio-c', async (req, res) => {
     }
 
     if (!out) return res.status(502).json({ error: 'AI render failed: ' + lastMsg });
-    const b64 = out && out.data && out.data[0] && out.data[0].b64_json;
-    if (!b64) return res.status(502).json({ error: 'The image service returned no image.' });
-    const mimeExt = IMAGE_FORMAT === 'jpeg' ? 'jpeg' : IMAGE_FORMAT === 'webp' ? 'webp' : 'png';
+    const got = out && out.data && out.data[0] && out.data[0].b64_json;
+    if (!got) return res.status(502).json({ error: 'The image service returned no image.' });
+    b64 = got;
+
+    validation = await validateRender(`data:image/${mimeExt};base64,` + b64, expectations);
+    if (validation.ok || pass === maxPasses - 1) {
+      if (process.env.RENDER_DEBUG !== 'off') {
+        console.log(`[render ${spaceId}/${mode}] validation: `
+          + (validation.skipped ? `skipped (${validation.reason || 'n/a'})`
+            : validation.ok ? `passed (saw ${JSON.stringify(validation.seen)})`
+            : `FAILED but out of retries — ${(validation.problems || []).join('; ')}`));
+      }
+      break;
+    }
+    console.log(`[render ${spaceId}/${mode}] validation rejected the image (${(validation.problems || []).join('; ')}) — regenerating once`);
+    }
+
     res.json({
       image: `data:image/${mimeExt};base64,` + b64,
       mode,
       model: attempt.model,
       size: attempt.size,
+      layoutCheck: validation && !validation.skipped
+        ? { ok: !!validation.ok, expected: validation.expected, seen: validation.seen, problems: validation.problems || [] }
+        : null,
     });
   } catch (e) {
     console.error('render-studio-c error', e);

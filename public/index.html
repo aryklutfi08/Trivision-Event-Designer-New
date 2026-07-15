@@ -1247,8 +1247,14 @@ function disposeGroup(group) {
   });
 }
 
-function FloorPlanCanvas({ space, items, onMove, onMoveGroup, onSelect, selectedIds, onDeselect, onResizeDrape, isMobile }) {
+// `groupIdsFor(id)` lets the owner widen a single-item drag into a group (used
+// by "move table and chairs together"); it returns the ids to drag as one.
+// `highlightIds` is purely visual — items to render with the gold selection
+// glow without actually being selected, so a table's chairs light up while the
+// selection itself stays just the table.
+function FloorPlanCanvas({ space, items, onMove, onMoveGroup, onSelect, selectedIds, onDeselect, onResizeDrape, isMobile, groupIdsFor, highlightIds }) {
   selectedIds = selectedIds || [];
+  const glowIds = (highlightIds && highlightIds.length) ? highlightIds : selectedIds;
   const containerRef = useRef(null);
   const stateRef = useRef({
     scene: null,
@@ -1268,7 +1274,7 @@ function FloorPlanCanvas({ space, items, onMove, onMoveGroup, onSelect, selected
   });
 
   // Keep latest callbacks/items inside stateRef so listeners stay valid
-  stateRef.current.callbacks = { onMove, onMoveGroup, onSelect, onDeselect, onResizeDrape };
+  stateRef.current.callbacks = { onMove, onMoveGroup, onSelect, onDeselect, onResizeDrape, groupIdsFor };
   stateRef.current.itemsCache = items;
   stateRef.current.selectedIds = selectedIds;
 
@@ -1460,9 +1466,13 @@ function FloorPlanCanvas({ space, items, onMove, onMoveGroup, onSelect, selected
         const additive = !!(e.shiftKey || e.metaKey || e.ctrlKey);
         stateRef.current.callbacks.onSelect(id, additive);
         if (!additive) {
-          // Dragging a member of a multi-selection moves the whole group.
+          // Dragging a member of a multi-selection moves the whole group;
+          // otherwise the owner may widen it (table + its chairs).
           const sel = stateRef.current.selectedIds || [];
-          const ids = (sel.includes(id) && sel.length > 1) ? sel.slice() : [id];
+          const gf = stateRef.current.callbacks.groupIdsFor;
+          const ids = (sel.includes(id) && sel.length > 1)
+            ? sel.slice()
+            : (gf ? gf(id) : [id]);
           stateRef.current.dragging = { id, ids };
         }
         e.preventDefault();
@@ -1582,7 +1592,10 @@ function FloorPlanCanvas({ space, items, onMove, onMoveGroup, onSelect, selected
           if (id) {
             stateRef.current.callbacks.onSelect(id, false);
             const sel = stateRef.current.selectedIds || [];
-            const ids = (sel.includes(id) && sel.length > 1) ? sel.slice() : [id];
+            const gf = stateRef.current.callbacks.groupIdsFor;
+            const ids = (sel.includes(id) && sel.length > 1)
+              ? sel.slice()
+              : (gf ? gf(id) : [id]);
             stateRef.current.dragging = { id, ids };
             touchState.mode = 'drag';
           } else {
@@ -1757,7 +1770,7 @@ function FloorPlanCanvas({ space, items, onMove, onMoveGroup, onSelect, selected
     items.forEach(item => {
       const f = FURN_BY_ID[item.furnId];
       if (!f) return;
-      const mesh = buildFurnitureMesh(item, f, selectedIds.includes(item.id));
+      const mesh = buildFurnitureMesh(item, f, glowIds.includes(item.id));
       const swap = item.rotation === 90 || item.rotation === 270;
       const dims = itemDims(item);
       const sizeW = swap ? dims.h : dims.w;
@@ -1771,7 +1784,7 @@ function FloorPlanCanvas({ space, items, onMove, onMoveGroup, onSelect, selected
       );
       itemGroup.add(mesh);
     });
-  }, [items, selectedIds.join(','), space.id, space.widthFt, space.depthFt]);
+  }, [items, glowIds.join(','), space.id, space.widthFt, space.depthFt]);
 
   const snapToView = (mode) => {
     const { camera, orbit } = stateRef.current;
@@ -3111,16 +3124,18 @@ function planToPngDataUrl(space, items, flip) {
 }
 
 // ── LAYOUT-LOCK GUIDE ──────────────────────────────────────────────────────
-// A clean, flat-shaded PERSPECTIVE snapshot of the exact layout, rendered off-
-// screen with Three.js from roughly the SAME viewpoint as the AI render's
-// reference photo. Unlike the top-down plan, it already shows the furniture in
-// perspective, so the image model no longer has to guess how a flat grid maps
-// into a photo — it just paints realism onto this arrangement. Solid colors:
-// blue tables, orange chairs (with a light front bar for facing), a dark stage
-// slab + red LED wall. Uses the SAME coordinate mapping as the live 3D scene
+// An exact PERSPECTIVE snapshot of the layout rendered off-screen from the
+// Three.js scene at the selected camera angle. This image is the PRIMARY
+// image-edit base sent to the model: the AI's job is only to add photorealism
+// on top of it, never to reconstruct the room. Because it is the edit base
+// (not a diagram) it is rendered to look like the real venue already — dark
+// carpet, black-draped rounds, black chairs — so the edit is a light realism
+// pass and the geometry survives. Deliberately NO grid/markers: anything drawn
+// here gets baked into the final photo.
+// Uses the SAME coordinate mapping as the live 3D scene
 // (worldX = xFt-w/2, worldZ = yFt-d/2, rotation via -rot around Y).
 function buildLayoutGuideDataUrl(space, items, flip) {
-  const OUT_W = 1200, OUT_H = 800;
+  const OUT_W = 1536, OUT_H = 1024; // matches the render's landscape aspect
   const W = space.widthFt, D = space.depthFt;
   let renderer;
   try {
@@ -3131,46 +3146,45 @@ function buildLayoutGuideDataUrl(space, items, flip) {
     renderer.setPixelRatio(1);
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x20242c);
-    scene.add(new THREE.AmbientLight(0xffffff, 0.85));
-    const key = new THREE.DirectionalLight(0xffffff, 0.6);
-    key.position.set(W * 0.3, 90, D * 0.3);
+    scene.background = new THREE.Color(0x0b0d11);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const key = new THREE.DirectionalLight(0xfff0dd, 0.85);
+    key.position.set(W * 0.25, 40, D * 0.25);
     scene.add(key);
+    const fill = new THREE.DirectionalLight(0xffffff, 0.35);
+    fill.position.set(-W * 0.3, 30, -D * 0.2);
+    scene.add(fill);
 
-    // Floor + a light grid so spacing reads clearly.
+    // Dark carpet floor — no grid: this is a photo base, not a diagram.
     const floor = new THREE.Mesh(
-      new THREE.PlaneGeometry(W, D),
-      new THREE.MeshStandardMaterial({ color: 0x3a4150, roughness: 1 })
+      new THREE.PlaneGeometry(W * 2, D * 2),
+      new THREE.MeshStandardMaterial({ color: 0x4a4742, roughness: 1 })
     );
     floor.rotation.x = -Math.PI / 2;
     scene.add(floor);
-    const grid = new THREE.GridHelper(Math.max(W, D), Math.max(W, D), 0x5b6478, 0x4a5162);
-    grid.position.y = 0.03;
-    scene.add(grid);
 
-    // Stage slab + LED wall (from the studio's fixtures), so its position and
-    // the far wall are unmistakable.
+    // Stage slab + LED wall from the studio's fixtures, so the stage sits at
+    // its true distance from the furniture.
     (space.fixtures || []).forEach(f => {
       if (f.type !== 'stage') return;
       const cx = f.x + f.w / 2 - W / 2;
       const cz = f.y + f.h / 2 - D / 2;
       const slab = new THREE.Mesh(new THREE.BoxGeometry(f.w, 1.5, f.h),
-        new THREE.MeshStandardMaterial({ color: 0x14171d, roughness: 0.9 }));
+        new THREE.MeshStandardMaterial({ color: 0x0d0f13, roughness: 0.9 }));
       slab.position.set(cx, 0.75, cz);
       scene.add(slab);
       const led = new THREE.Mesh(new THREE.BoxGeometry(f.w, 9, 0.4),
-        new THREE.MeshBasicMaterial({ color: 0xd23b57 }));
+        new THREE.MeshBasicMaterial({ color: 0x2b3a6b }));
       led.position.set(cx, 9 / 2 + 1.5, f.y - D / 2 + 0.25);
       scene.add(led);
     });
 
-    // Furniture as flat solids.
-    const TABLE_MAT = new THREE.MeshStandardMaterial({ color: 0x2f6fd6, roughness: 0.8 });
-    const CHAIR_MAT = new THREE.MeshStandardMaterial({ color: 0xe08a3c, roughness: 0.85 });
-    const FRONT_MAT = new THREE.MeshBasicMaterial({ color: 0xfff2d6 }); // facing marker
-    const LOUNGE_MAT = new THREE.MeshStandardMaterial({ color: 0x7a5cff, roughness: 0.85 });
-    const DRAPE_MAT = new THREE.MeshStandardMaterial({ color: 0x6b21a8, roughness: 0.9 });
-    const OTHER_MAT = new THREE.MeshStandardMaterial({ color: 0x9aa3b2, roughness: 0.9 });
+    // Venue-realistic materials so the AI only has to add photorealism.
+    const LINEN_MAT = new THREE.MeshStandardMaterial({ color: 0x24262b, roughness: 0.95 });
+    const CHAIR_MAT = new THREE.MeshStandardMaterial({ color: 0x1b1d21, roughness: 0.9 });
+    const LOUNGE_MAT = new THREE.MeshStandardMaterial({ color: 0x2e2a33, roughness: 0.9 });
+    const DRAPE_MAT = new THREE.MeshStandardMaterial({ color: 0x191a1f, roughness: 0.95 });
+    const OTHER_MAT = new THREE.MeshStandardMaterial({ color: 0x3a3d44, roughness: 0.9 });
 
     items.forEach(it => {
       const f = FURN_BY_ID[it.furnId];
@@ -3185,20 +3199,25 @@ function buildLayoutGuideDataUrl(space, items, flip) {
       g.position.set(cx, 0, cz);
       g.rotation.y = -((it.rotation || 0) * Math.PI) / 180;
       if (f.type === 'table') {
+        // Floor-length draped table: full cylinder to the floor reads as linen.
         if (f.shape === 'circle') {
           const r = f.diameter / 2;
-          const top = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 2.4, 28), TABLE_MAT);
-          top.position.y = 1.2; g.add(top);
+          const drape = new THREE.Mesh(new THREE.CylinderGeometry(r, r * 1.02, 2.5, 32), LINEN_MAT);
+          drape.position.y = 1.25; g.add(drape);
+          const top = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.08, 32), LINEN_MAT);
+          top.position.y = 2.5; g.add(top);
         } else {
-          const b = new THREE.Mesh(new THREE.BoxGeometry(f.w, 2.4, f.h), TABLE_MAT);
-          b.position.y = 1.2; g.add(b);
+          const b = new THREE.Mesh(new THREE.BoxGeometry(f.w, 2.5, f.h), LINEN_MAT);
+          b.position.y = 1.25; g.add(b);
         }
       } else if (f.type === 'chair') {
-        const seat = new THREE.Mesh(new THREE.BoxGeometry(1.3, 1.6, 1.3), CHAIR_MAT);
-        seat.position.y = 0.8; g.add(seat);
-        // Front marker: chairs face -z in local space (same as the live scene).
-        const front = new THREE.Mesh(new THREE.BoxGeometry(1.0, 1.6, 0.2), FRONT_MAT);
-        front.position.set(0, 0.85, -0.7); g.add(front);
+        // Seat + back, so the chair's facing is real geometry (no marker bar).
+        const seat = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.25, 1.35), CHAIR_MAT);
+        seat.position.y = 1.45; g.add(seat);
+        const back = new THREE.Mesh(new THREE.BoxGeometry(1.35, 1.9, 0.18), CHAIR_MAT);
+        back.position.set(0, 2.35, 0.6); g.add(back); // back on +z → faces -z
+        const skirt = new THREE.Mesh(new THREE.BoxGeometry(1.3, 1.45, 1.3), CHAIR_MAT);
+        skirt.position.y = 0.72; g.add(skirt);
       } else if (f.type === 'lounge') {
         const b = new THREE.Mesh(new THREE.BoxGeometry(f.w, 1.6, f.h), LOUNGE_MAT);
         b.position.y = 0.8; g.add(b);
@@ -3217,21 +3236,87 @@ function buildLayoutGuideDataUrl(space, items, flip) {
     // stage side (worldZ ≈ -D/2), looking toward +Z; flip=false → near edge is
     // the entrance/front (worldZ ≈ +D/2), looking toward -Z. Left/right then
     // agree with the plan's LEFT=x0 / RIGHT=xW convention.
-    const camera = new THREE.PerspectiveCamera(56, OUT_W / OUT_H, 0.5, 1000);
-    const eye = Math.max(7, D * 0.14);
-    const back = D * 0.06;
-    if (flip) {
-      // From the stage, looking OUT at the audience (+Z). Stand at the stage's
-      // downstage edge so the LED wall stays BEHIND the camera (never blocks
-      // the view); if there's no stage, fall back to just inside the top edge.
-      let frontZ = -D / 2 + 6;
-      (space.fixtures || []).forEach(f => { if (f.type === 'stage') frontZ = Math.max(frontZ, (f.y + f.h) - D / 2); });
-      camera.position.set(0, eye, frontZ + 2);
-      camera.lookAt(0, 2, D * 0.32);
+    // ── AUTO-FRAMING ──────────────────────────────────────────────────────
+    // Fit the camera around the WHOLE layout with a safety margin. Fixed
+    // offsets used to leave the pieces nearest the camera outside the frustum,
+    // clipped at the bottom/side edges — and the image model then "tidied away"
+    // those half-cropped front tables instead of drawing them. Every furniture
+    // corner is projected and the camera backs off / rises until they all sit
+    // inside the frame. The viewpoint (which end of the room, looking which
+    // way) is unchanged — only the coverage widens.
+    const framePts = [];
+    items.forEach(it => {
+      const f = FURN_BY_ID[it.furnId];
+      if (!f) return;
+      const dims = itemDims(it);
+      const swap = it.rotation === 90 || it.rotation === 270;
+      const sw = swap ? dims.h : dims.w, sd = swap ? dims.w : dims.h;
+      const cx = it.xFt + sw / 2 - W / 2;
+      const cz = it.yFt + sd / 2 - D / 2;
+      const h = f.type === 'drape' ? 7 : f.type === 'chair' ? 3.3 : f.type === 'table' ? 2.6 : 2;
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) for (const sy of [0, 1]) {
+        framePts.push(new THREE.Vector3(cx + sx * sw / 2, sy * h, cz + sz * sd / 2));
+      }
+    });
+
+    const BASE_FOV = 58;
+    const camera = new THREE.PerspectiveCamera(BASE_FOV, OUT_W / OUT_H, 0.5, 2000);
+    // The camera's home end of the room + look direction, per selected angle.
+    let frontZ = -D / 2 + 6;
+    (space.fixtures || []).forEach(f => { if (f.type === 'stage') frontZ = Math.max(frontZ, (f.y + f.h) - D / 2); });
+    const nearZ = flip ? frontZ + 2 : D / 2 + D * 0.06;
+    const dirZ = flip ? 1 : -1; // looking toward +Z (from stage) / -Z (facing stage)
+
+    if (!framePts.length) {
+      camera.position.set(0, Math.max(7, D * 0.14), nearZ);
+      camera.lookAt(0, 2, nearZ + dirZ * D * 0.3);
     } else {
-      // Facing the stage from the back of the room, looking toward -Z.
-      camera.position.set(0, eye, D / 2 + back);
-      camera.lookAt(0, 2.5, -D * 0.18);
+      let mnX = Infinity, mxX = -Infinity, mnZ = Infinity, mxZ = -Infinity, mxY = 0;
+      framePts.forEach(p => {
+        mnX = Math.min(mnX, p.x); mxX = Math.max(mxX, p.x);
+        mnZ = Math.min(mnZ, p.z); mxZ = Math.max(mxZ, p.z);
+        mxY = Math.max(mxY, p.y);
+      });
+      const tgt = new THREE.Vector3((mnX + mxX) / 2, Math.min(3, mxY * 0.5), (mnZ + mxZ) / 2);
+      const worstNdc = () => {
+        camera.updateMatrixWorld(true);
+        camera.updateProjectionMatrix();
+        let worst = 0;
+        for (const p of framePts) {
+          const q = p.clone().project(camera);
+          if (q.z > 1) return 99; // corner is behind the camera → must back off
+          worst = Math.max(worst, Math.abs(q.x), Math.abs(q.y));
+        }
+        return worst;
+      };
+      // Three-phase fit, cheapest/most-natural lever first, so a deep layout
+      // never turns into a drone shot:
+      //  1. dolly back (raises height only as much as the pitch needs);
+      //  2. once pitch hits a human-scale ceiling, stop climbing — widen the
+      //     lens instead (a photographer's real fallback when they physically
+      //     can't back up further, e.g. pinned near the stage face);
+      //  3. distance is still allowed to grow after that, but height/pitch no
+      //     longer balloon with it.
+      const MAX_PITCH = 0.34; // ~19° — keeps the shot eye-level, not aerial
+      const MAX_FOV = 84;
+      let dist = Math.max(Math.abs(tgt.z - nearZ), D * 0.25);
+      let pitch = 0.16;
+      let fov = BASE_FOV;
+      for (let i = 0; i < 140; i++) {
+        let cz = tgt.z - dirZ * dist * Math.cos(pitch);
+        const cy = Math.max(4, tgt.y + dist * Math.sin(pitch));
+        // From the stage, never retreat behind the LED wall / stage face —
+        // once this clamp binds, growing `dist` no longer moves the camera,
+        // so phases 2/3 (pitch, then FOV) take over.
+        if (flip) cz = Math.max(cz, frontZ + 1.5);
+        camera.position.set(tgt.x, cy, cz);
+        camera.lookAt(tgt);
+        camera.fov = fov;
+        if (worstNdc() <= 0.9) break; // ~10% safe margin on every side
+        if (pitch < MAX_PITCH) { pitch += 0.01; dist *= 1.05; continue; }
+        if (fov < MAX_FOV) { fov += 2; continue; }
+        dist *= 1.05; // last resort once lens and pitch are both maxed
+      }
     }
 
     renderer.render(scene, camera);
@@ -3248,49 +3333,36 @@ function buildLayoutGuideDataUrl(space, items, flip) {
 // exact plan position instead of guessing from counts. Coordinates are the
 // CENTER of each object in feet, in the unified photo frame (see
 // STUDIO_PLAN_VIEW): x 0→width left→right, y 0→depth far→near-camera.
-function buildLayoutManifest(space, items, flip) {
-  const W = space.widthFt, D = space.depthFt;
-  const tx = (x) => flip ? W - x : x;
-  const ty = (y) => flip ? D - y : y;
-  const r1 = (v) => Math.round(v * 10) / 10;
-
-  const objs = items.map((it) => {
-    const f = FURN_BY_ID[it.furnId];
-    if (!f) return null;
-    const dims = itemDims(it);
-    const swap = it.rotation === 90 || it.rotation === 270;
-    const w = swap ? dims.h : dims.w;
-    const d = swap ? dims.w : dims.h;
-    return {
-      f, label: f.label,
-      cx: tx(it.xFt + w / 2), cy: ty(it.yFt + d / 2),
-      w, d, rotation: it.rotation || 0,
-      isTable: f.type === 'table',
-      isChair: f.type === 'chair' || f.type === 'lounge',
-    };
-  }).filter(Boolean);
-
-  // Match chairs to the tables they actually belong to, in two passes so that
-  // rows of theatre/classroom chairs which merely sit near a table are not
-  // mistaken for its seating:
-  //   1. tentatively attach each chair to the nearest table it hugs or faces;
-  //   2. keep the attachment only for tables that look genuinely SEATED.
-  // A ROUND table is "seated" only when its chairs ring it — i.e. they show at
-  // least two different rotations, because banquet chairs each face the centre
-  // from a different angle. A block of theatre chairs all shares ONE rotation,
-  // so a round table dropped inside a seating grid is correctly left bare and
-  // its neighbours stay standalone. RECT tables (classroom) legitimately have
-  // a single row of same-facing chairs, so they stay on plain proximity.
-  const tables = objs.filter(o => o.isTable);
-  const candChairs = new Map(tables.map(t => [t, []]));
-  objs.forEach(o => {
-    o.table = null;
-    if (!o.isChair || !tables.length) return;
-    // Facing unit vector in the SAME (flipped) frame as cx/cy so it lines up
-    // with the direction from the chair to a table. 0=up,90=right,180=down,270=left.
-    const reff = (((o.rotation || 0) + (flip ? 180 : 0)) % 360 + 360) % 360;
-    const fvx = reff === 90 ? 1 : reff === 270 ? -1 : 0;
-    const fvy = reff === 0 ? -1 : reff === 180 ? 1 : 0;
+// ONE definition of "which chairs belong to which table", shared by the AI
+// render manifest and the designer's grouped-move option so the two can never
+// disagree about what a table group is.
+//
+// Nodes: { cx, cy, w, d, facingRot, isTable, isChair, shape }. Runs in two
+// passes so rows of theatre/classroom chairs that merely sit near a table are
+// not mistaken for its seating:
+//   1. tentatively attach each chair to the nearest table it hugs or faces;
+//   2. keep the attachment only for tables that look genuinely SEATED.
+// A ROUND table is "seated" only when its chairs ring it — i.e. they show at
+// least two different rotations, because banquet chairs each face the centre
+// from a different angle. A block of theatre chairs all shares ONE rotation, so
+// a round table dropped inside a seating grid is correctly left bare and its
+// neighbours stay standalone. RECT tables (classroom) legitimately have a
+// single row of same-facing chairs, so they stay on plain proximity.
+//
+// Callers pass facingRot already in the same frame as cx/cy. The manifest's
+// 180° flip rotates positions and facings together, so the outcome is identical
+// either way. Returns Map(tableNode -> [chairNode…]); never mutates the nodes.
+function assignChairsToTables(nodes) {
+  const tables = nodes.filter(o => o.isTable);
+  const groups = new Map(tables.map(t => [t, []]));
+  if (!tables.length) return groups;
+  const cand = new Map(tables.map(t => [t, []]));
+  nodes.forEach(o => {
+    if (!o.isChair) return;
+    // Facing unit vector: 0=up, 90=right, 180=down, 270=left.
+    const r = (((o.facingRot || 0) % 360) + 360) % 360;
+    const fvx = r === 90 ? 1 : r === 270 ? -1 : 0;
+    const fvy = r === 0 ? -1 : r === 180 ? 1 : 0;
     let best = null, bd = Infinity;
     tables.forEach(t => {
       const radius = Math.max(t.w, t.d) / 2;
@@ -3305,15 +3377,76 @@ function buildLayoutManifest(space, items, flip) {
       }
       if (belongs) { best = t; bd = dist; }
     });
-    if (best) candChairs.get(best).push(o);
+    if (best) cand.get(best).push(o);
   });
   tables.forEach(t => {
-    const cand = candChairs.get(t);
-    const isRound = t.f && t.f.shape === 'circle';
-    const distinctRotations = new Set(cand.map(c => ((c.rotation || 0) % 360 + 360) % 360)).size;
-    const seated = isRound ? distinctRotations >= 2 : cand.length > 0;
-    if (seated) cand.forEach(c => { c.table = t; });
+    const c = cand.get(t);
+    const isRound = t.shape === 'circle';
+    const distinctRotations = new Set(c.map(x => (((x.facingRot || 0) % 360) + 360) % 360)).size;
+    const seated = isRound ? distinctRotations >= 2 : c.length > 0;
+    if (seated) groups.set(t, c);
   });
+  return groups;
+}
+
+// Turn placed items into association nodes in RAW designer coordinates.
+function itemsToGroupNodes(items) {
+  return items.map((it) => {
+    const f = FURN_BY_ID[it.furnId];
+    if (!f) return null;
+    const dims = itemDims(it);
+    const swap = it.rotation === 90 || it.rotation === 270;
+    const w = swap ? dims.h : dims.w;
+    const d = swap ? dims.w : dims.h;
+    return {
+      id: it.id,
+      cx: it.xFt + w / 2, cy: it.yFt + d / 2, w, d,
+      facingRot: (((it.rotation || 0) % 360) + 360) % 360,
+      isTable: f.type === 'table',
+      isChair: f.type === 'chair' || f.type === 'lounge',
+      shape: f.shape,
+    };
+  }).filter(Boolean);
+}
+
+// The chairs that belong to a given table item, using the exact rule above.
+// Returns [] for a bare table (or a non-table), so callers can treat "has a
+// group" as chairIds.length > 0.
+function tableGroupChairIds(items, tableId) {
+  if (!tableId) return [];
+  const groups = assignChairsToTables(itemsToGroupNodes(items));
+  for (const [t, chairs] of groups) {
+    if (t.id === tableId) return chairs.map(c => c.id);
+  }
+  return [];
+}
+
+function buildLayoutManifest(space, items, flip) {
+  const W = space.widthFt, D = space.depthFt;
+  const tx = (x) => flip ? W - x : x;
+  const ty = (y) => flip ? D - y : y;
+  const r1 = (v) => Math.round(v * 10) / 10;
+
+  const objs = items.map((it) => {
+    const f = FURN_BY_ID[it.furnId];
+    if (!f) return null;
+    const dims = itemDims(it);
+    const swap = it.rotation === 90 || it.rotation === 270;
+    const w = swap ? dims.h : dims.w;
+    const d = swap ? dims.w : dims.h;
+    return {
+      f, label: f.label, shape: f.shape,
+      cx: tx(it.xFt + w / 2), cy: ty(it.yFt + d / 2),
+      w, d, rotation: it.rotation || 0,
+      // Facing in the same (flipped) frame as cx/cy.
+      facingRot: (((it.rotation || 0) + (flip ? 180 : 0)) % 360 + 360) % 360,
+      isTable: f.type === 'table',
+      isChair: f.type === 'chair' || f.type === 'lounge',
+    };
+  }).filter(Boolean);
+
+  objs.forEach(o => { o.table = null; });
+  assignChairsToTables(objs).forEach((chairs, t) => { chairs.forEach(c => { c.table = t; }); });
   // Nearest-neighbour distance → "close to another object" flag.
   objs.forEach(o => {
     let nd = Infinity;
@@ -3353,7 +3486,7 @@ function buildLayoutManifest(space, items, flip) {
       : (o.isChair ? facingWord(o.rotation) : null),
     closeToAnother: o.nn <= 3,
   }));
-  const clusters = tables.map(t => ({
+  const clusters = objs.filter(o => o.isTable).map(t => ({
     tableId: idOf.get(t),
     chairIds: objs.filter(o => o.table === t).map(o => idOf.get(o)),
   }));
@@ -4260,6 +4393,33 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
   const selected = selectedId ? items.find(it => it.id === selectedId) : null;
   const selectedFurn = selected ? FURN_BY_ID[selected.furnId] : null;
 
+  // ── Move table and chairs together ──────────────────────────────────────
+  // Purely a drag-time convenience: the table and its chairs stay separate,
+  // individually editable items — nothing is merged, and only xFt/yFt change.
+  const [groupMove, setGroupMove] = useState(true);
+  // Chairs belonging to the currently selected table (empty for a bare table,
+  // a chair, or any non-table). Drives both the checkbox and the glow.
+  const selectedTableChairIds = useMemo(
+    () => (selectedFurn && selectedFurn.type === 'table' ? tableGroupChairIds(items, selectedId) : []),
+    [items, selectedId, selectedFurn]
+  );
+  // Widen a single-item drag to the whole table group. Only ever fires for a
+  // table that really has chairs; dragging a chair always moves just that chair.
+  const groupIdsFor = useCallback((id) => {
+    if (!groupMove) return [id];
+    const it = items.find(x => x.id === id);
+    const f = it && FURN_BY_ID[it.furnId];
+    if (!f || f.type !== 'table') return [id];
+    const chairIds = tableGroupChairIds(items, id);
+    return chairIds.length ? [id, ...chairIds] : [id];
+  }, [items, groupMove]);
+  // Glow the chairs with the table so the group is obvious, without selecting
+  // them (selection stays the table, so delete/rotate/duplicate are unchanged).
+  const highlightIds = useMemo(
+    () => (groupMove && selectedTableChairIds.length ? [...selectedIds, ...selectedTableChairIds] : selectedIds),
+    [groupMove, selectedTableChairIds, selectedIds]
+  );
+
   const handleSave = () => {
     setShowSaved(true);
     setTimeout(() => setShowSaved(false), 2000);
@@ -4575,6 +4735,20 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
                 <div className="text-sm font-medium">{selected.yFt.toFixed(1)}</div>
               </div>
             </div>
+            {/* Only for a table that actually has chairs around it. */}
+            {selectedTableChairIds.length > 0 && (
+              <label
+                title="Drag the table to move its chairs with it, keeping their exact spacing and rotation. The chairs stay separate, editable items."
+                className={classNames(
+                  'flex items-center gap-2 px-2 py-1.5 text-xs rounded border cursor-pointer select-none',
+                  groupMove ? 'border-[var(--tv-gold)]/60 tv-panel-2 tv-gold' : 'tv-divider tv-panel-2 tv-muted hover:border-[var(--tv-gold)]'
+                )}
+              >
+                <input type="checkbox" checked={groupMove} onChange={e => setGroupMove(e.target.checked)} className="accent-[#c8a96a]" />
+                <span>Move table and chairs together</span>
+                <span className="ml-auto text-[10px] opacity-70">{selectedTableChairIds.length} chair{selectedTableChairIds.length === 1 ? '' : 's'}</span>
+              </label>
+            )}
             <div className="flex gap-2">
               {(selectedFurn.shape === 'rect' || selectedFurn.type === 'drape') && (
                 <button onClick={() => rotateItem(selected.id)} className="flex-1 px-2 py-1.5 text-xs tv-panel-2 border tv-divider rounded hover:border-[var(--tv-gold)]">⟳ Rotate</button>
@@ -4639,6 +4813,8 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
           onDeselect={() => setSelectedIds([])}
           onResizeDrape={resizeDrapeEnd}
           isMobile={isMobile}
+          groupIdsFor={groupIdsFor}
+          highlightIds={highlightIds}
         />
       </div>
       {!isMobile && (
