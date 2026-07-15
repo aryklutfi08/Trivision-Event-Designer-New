@@ -4240,8 +4240,11 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
     }));
   };
 
-  const deleteItem = (id) => {
-    setItems(prev => prev.filter(it => it.id !== id));
+  // Accepts a single id or an array (e.g. a table + its grouped chairs) so a
+  // grouped delete is one undo step, not one per piece.
+  const deleteItem = (idOrIds) => {
+    const ids = Array.isArray(idOrIds) ? idOrIds : [idOrIds];
+    setItems(prev => prev.filter(it => !ids.includes(it.id)));
     setSelectedIds([]);
   };
 
@@ -4414,7 +4417,8 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
     return chairIds.length ? [id, ...chairIds] : [id];
   }, [items, groupMove]);
   // Glow the chairs with the table so the group is obvious, without selecting
-  // them (selection stays the table, so delete/rotate/duplicate are unchanged).
+  // them (selection stays the table, so rotate/duplicate act on the table
+  // alone; delete uses groupIdsFor explicitly so it can remove the group).
   const highlightIds = useMemo(
     () => (groupMove && selectedTableChairIds.length ? [...selectedIds, ...selectedTableChairIds] : selectedIds),
     [groupMove, selectedTableChairIds, selectedIds]
@@ -4754,7 +4758,13 @@ function Designer({ events, currentEvent, onSaveEvent, isMobile, activeProject, 
                 <button onClick={() => rotateItem(selected.id)} className="flex-1 px-2 py-1.5 text-xs tv-panel-2 border tv-divider rounded hover:border-[var(--tv-gold)]">⟳ Rotate</button>
               )}
               <button onClick={() => duplicateItem(selected.id)} className="flex-1 px-2 py-1.5 text-xs tv-panel-2 border tv-divider rounded hover:border-[var(--tv-gold)]">⎘ Duplicate</button>
-              <button onClick={() => deleteItem(selected.id)} className="flex-1 px-2 py-1.5 text-xs rounded tv-red-bg">✕ Delete</button>
+              <button
+                onClick={() => deleteItem(groupIdsFor(selected.id))}
+                title={groupMove && selectedTableChairIds.length ? `Deletes this table and its ${selectedTableChairIds.length} chair(s)` : undefined}
+                className="flex-1 px-2 py-1.5 text-xs rounded tv-red-bg"
+              >
+                ✕ Delete{groupMove && selectedTableChairIds.length ? ` (+${selectedTableChairIds.length})` : ''}
+              </button>
             </div>
           </div>
         ) : (
