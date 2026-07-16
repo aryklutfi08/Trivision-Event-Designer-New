@@ -769,36 +769,37 @@ function formatManifest(m) {
 }
 
 // Compact machine-readable blueprint of the layout: every item's type, plan
-// position, rotation, footprint and table grouping, plus per-type counts.
-// The image model parses coordinates far more reliably from clean JSON than
-// from prose, so this is the authoritative placement source.
-function formatLayoutJson(m) {
+// position, rotation and footprint, plus per-type counts. The image model
+// parses coordinates far more reliably from clean JSON than from prose, but
+// it is only ever a CROSS-CHECK — the guide image (when present) and the
+// prose manifest above already lock exact geometry and chair-to-table
+// grouping, so this blueprint intentionally drops per-item ids, the
+// id-based table/chair grouping, and sub-inch coordinate precision: none of
+// that changes what gets rendered, it only bloats the prompt. Large layouts
+// can otherwise push the prompt past OpenAI's ~32,000-character limit, so
+// keep this JSON as lean as the placement info allows.
+function formatLayoutJson(m, capOverride) {
   if (!m || !Array.isArray(m.objects) || m.objects.length === 0) return '';
   const objs = m.objects.filter(o => o && typeof o.id === 'number' && typeof o.type === 'string');
   if (!objs.length) return '';
-  const CAP = 200; // bound prompt size on pathological layouts
+  const CAP = capOverride > 0 ? capOverride : 200; // bound prompt size on pathological layouts
+  const round1 = (v) => Math.round(Number(v) * 10) / 10;
+  const round0 = (v) => Math.round(Number(v)) || 0;
   const counts = {};
   objs.forEach(o => { counts[o.type] = (counts[o.type] || 0) + 1; });
-  const items = objs.slice(0, CAP).map(o => ({
-    id: o.id,
-    type: o.type,
-    xFt: o.xFt, yFt: o.yFt,
-    rotationDeg: o.rotation || 0,
-    widthFt: o.widthFt, depthFt: o.depthFt,
-    atTable: o.aroundTableId || null,
-  }));
+  const items = objs.slice(0, CAP).map(o => ([
+    o.type, round1(o.xFt), round1(o.yFt), round0(o.rotation || 0), round1(o.widthFt), round1(o.depthFt),
+  ]));
   const blueprint = {
     roomFt: { w: Number(m.roomWidthFt) || undefined, d: Number(m.roomDepthFt) || undefined },
     totalItems: objs.length,
     counts,
-    tableGroups: Array.isArray(m.clusters)
-      ? m.clusters.map(c => ({ tableId: c.tableId, chairIds: Array.isArray(c.chairIds) ? c.chairIds : [] }))
-      : [],
-    standaloneChairIds: Array.isArray(m.standaloneChairs) ? m.standaloneChairs : [],
+    // Each entry: [type, xFt, yFt, rotationDeg, widthFt, depthFt]
     items,
   };
   const truncated = objs.length > CAP ? `\n(items list truncated to first ${CAP}; remaining pieces continue the same pattern shown in the plan image.)` : '';
-  return 'STRUCTURED LAYOUT JSON (authoritative placement blueprint — coordinates are in feet on the same grid as the plan image):\n'
+  return 'STRUCTURED LAYOUT JSON (cross-check only — coordinates are in feet on the same grid as the plan image; '
+    + 'each item is [type, xFt, yFt, rotationDeg, widthFt, depthFt]):\n'
     + JSON.stringify(blueprint) + truncated;
 }
 
@@ -1092,10 +1093,33 @@ app.post('/api/render-studio-c', async (req, res) => {
       'of this exact room fully set up for an event. No people. Do not add any text, signage, lettering, logos, or watermarks',
       'anywhere in the image — not on walls, not on the floor, nowhere.'
     );
-    const promptText = prompt.filter(Boolean).join('\n\n');
+    let promptText = prompt.filter(Boolean).join('\n\n');
 
     const mode = (req.body || {}).mode === 'hd' ? 'hd' : 'preview';
     const modeCfg = RENDER_MODES[mode];
+
+    // ---- Prompt size safety net ------------------------------------------
+    // OpenAI's image prompt field rejects requests over ~32,000 characters.
+    // The structured layout JSON is the one piece that scales with furniture
+    // count, so on pathologically large layouts it can still push the
+    // assembled prompt over the limit even after the compaction above. If so,
+    // re-render just that JSON with fewer items (never touching the
+    // positions/rotations of the items that remain) until the prompt fits;
+    // a hard string trim is the last-resort backstop so the API call never
+    // outright fails on a huge layout.
+    const PROMPT_SAFETY_LIMIT = 31500;
+    const promptLengthBeforeTrim = promptText.length;
+    if (promptText.length > PROMPT_SAFETY_LIMIT && layoutJsonText && manifest) {
+      let cap = Array.isArray(manifest.objects) ? manifest.objects.length : 200;
+      while (promptText.length > PROMPT_SAFETY_LIMIT && cap > 10) {
+        cap = Math.floor(cap * 0.7);
+        const shrunkLayoutJsonText = formatLayoutJson(manifest, cap);
+        promptText = prompt.filter(Boolean).join('\n\n').replace(layoutJsonText, shrunkLayoutJsonText);
+      }
+      if (promptText.length > PROMPT_SAFETY_LIMIT) promptText = promptText.slice(0, PROMPT_SAFETY_LIMIT);
+    }
+    console.log(`[render ${spaceId}/${mode}] prompt length: ${promptText.length} chars`
+      + (promptText.length !== promptLengthBeforeTrim ? ` (trimmed from ${promptLengthBeforeTrim})` : ''));
 
     // ---- Render debug preview -------------------------------------------
     // Full prompt + manifest sent to OpenAI, so you can verify every table
