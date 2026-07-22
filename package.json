@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "nodemon server.js",
     "start": "node server.js",
-    "test": "node qa/seat-count.mjs",
+    "test": "node qa/seat-count.mjs && node qa/facing.mjs",
     "postinstall": "prisma generate",
     "db:deploy": "prisma migrate deploy",
     "db:push": "prisma db push",

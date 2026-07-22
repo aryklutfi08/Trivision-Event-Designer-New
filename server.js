@@ -764,6 +764,47 @@ function formatManifest(m) {
   if (!hasAnyChair) {
     lines.push('• THIS LAYOUT CONTAINS NO CHAIRS AT ALL. The finished photo must show ZERO chairs — every table stands bare.');
   }
+
+  // ── FACING ───────────────────────────────────────────────────────────────
+  // The prompt's CHAIR ORIENTATION rule tells the model to obey "the FACING
+  // value in the manifest", so the manifest has to actually STATE it. Every
+  // facing below is expressed in the photo frame — the same frame as the
+  // coordinates and as the layout guide image's camera — so "toward the far
+  // wall" always means the far wall as seen in the finished render.
+  const isChairType = (o) => /chair|sofa|lounge/i.test(o.type || '');
+  const freeChairs = objs.filter(o => isChairType(o) && !o.aroundTableId && typeof o.facing === 'string' && o.facing);
+  if (freeChairs.length) {
+    const byFacing = new Map();
+    freeChairs.forEach(o => {
+      if (!byFacing.has(o.facing)) byFacing.set(o.facing, []);
+      byFacing.get(o.facing).push(o.id);
+    });
+    byFacing.forEach((ids, facing) => {
+      // Long id lists add nothing but prompt length once the direction and the
+      // count are stated, so cap the enumeration.
+      const shown = ids.slice(0, 40);
+      const idList = '#' + shown.join(', #') + (ids.length > shown.length ? `, … (${ids.length} in total)` : '');
+      lines.push(`• FACING — ${ids.length} chair(s) face ${facing}. These are chairs ${idList}. `
+        + 'Every one of them points that exact way: the seat and the sitter\'s knees point in that direction and the chair\'s '
+        + 'BACKREST is on the opposite side. Do NOT reverse, mirror, or turn them around.');
+    });
+  }
+  if (Array.isArray(m.clusters) && m.clusters.some(c => c && Array.isArray(c.chairIds) && c.chairIds.length)) {
+    lines.push('• FACING — every chair listed around a table faces INWARD toward that table\'s center: seat toward the table, '
+      + 'backrest pointing outward away from it.');
+  }
+  // Anchor the abstract directions to the room's real focal point, so "rows
+  // facing the stage" cannot be rendered as rows facing away from it.
+  if (m.stage && (m.stage.side === 'far' || m.stage.side === 'near')) {
+    lines.push(m.stage.side === 'far'
+      ? '• STAGE ANCHOR: in THIS view the stage (with its LED wall/screen) is the FAR end of the room, in the background of the '
+        + 'photo. So a chair whose FACING is "toward the far wall" is facing the stage and the LED wall, and the camera sees the '
+        + 'BACKS of those chairs. A chair facing "toward the camera" has its back to the stage.'
+      : '• STAGE ANCHOR: in THIS view the camera stands ON/AT the stage and its LED wall — the stage is the NEAR edge of the '
+        + 'photo, behind and beneath the viewpoint. So a chair whose FACING is "toward the camera" is facing the stage and the '
+        + 'LED wall, and the camera sees the FRONTS of those chairs, with their backrests pointing away into the room. A chair '
+        + 'facing "toward the far wall" has its back to the stage.');
+  }
   lines.push('Per-item coordinates for every piece are in the STRUCTURED LAYOUT JSON below — place each item at its exact xFt/yFt.');
   return lines.join('\n');
 }
@@ -799,7 +840,11 @@ function formatLayoutJson(m, capOverride) {
   };
   const truncated = objs.length > CAP ? `\n(items list truncated to first ${CAP}; remaining pieces continue the same pattern shown in the plan image.)` : '';
   return 'STRUCTURED LAYOUT JSON (cross-check only — coordinates are in feet on the same grid as the plan image; '
-    + 'each item is [type, xFt, yFt, rotationDeg, widthFt, depthFt]):\n'
+    + 'each item is [type, xFt, yFt, rotationDeg, widthFt, depthFt]).\n'
+    + 'rotationDeg is the direction the item FACES, measured in the frame of THIS photo: 0 = facing the far wall (away from the '
+    + 'camera, so you see the chair\'s back), 90 = facing the right side, 180 = facing the camera (you see the front of the seat), '
+    + '270 = facing the left side. x/y and rotationDeg are in the same frame — never re-orient a chair by flipping or mirroring '
+    + 'this value.\n'
     + JSON.stringify(blueprint) + truncated;
 }
 

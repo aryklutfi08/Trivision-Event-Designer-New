@@ -3462,12 +3462,11 @@ function buildLayoutManifest(space, items, flip) {
     const m = Math.min(dl, dr, dfar, dnear);
     return m === dfar ? 'far/back wall' : m === dnear ? 'near/front (camera side)' : m === dl ? 'left wall' : 'right wall';
   };
-  // Facing direction in the unified photo frame. Designer rotation is
-  // clockwise from "up" (toward the top of the plan); the 180° plan flip for
-  // stage-view studios adds 180°. 0°=far wall, 90°=right, 180°=camera,
-  // 270°=left.
-  const facingWord = (rot) => {
-    const t = (((rot || 0) + (flip ? 180 : 0)) % 360 + 360) % 360;
+  // Facing direction, stated in the unified photo frame (0°=far wall,
+  // 90°=right, 180°=camera, 270°=left). Takes an ALREADY-flipped rotation
+  // (facingRot), so position and facing can never disagree about which frame
+  // they are in — the bug that rendered stage-facing theatre rows backwards.
+  const facingWord = (t) => {
     if (t >= 315 || t < 45) return 'toward the far wall (back of the chair to the camera)';
     if (t < 135) return 'toward the right side of the room';
     if (t < 225) return 'toward the camera (foreground)';
@@ -3476,14 +3475,18 @@ function buildLayoutManifest(space, items, flip) {
 
   const objects = objs.map(o => ({
     id: idOf.get(o), type: o.label,
-    xFt: r1(o.cx), yFt: r1(o.cy), rotation: o.rotation,
+    xFt: r1(o.cx), yFt: r1(o.cy),
+    // Photo-frame rotation — the SAME frame as xFt/yFt. Emitting the raw
+    // designer rotation here while flipping the coordinates made every chair
+    // in a stage-view render face 180° the wrong way.
+    rotation: o.facingRot,
     widthFt: r1(o.w), depthFt: r1(o.d),
     zone: `${dz(o.cy)}, ${hz(o.cx)}`,
     nearestWall: wall(o),
     aroundTableId: o.table ? idOf.get(o.table) : null,
     facing: o.table
       ? `inward toward the center of table #${idOf.get(o.table)}`
-      : (o.isChair ? facingWord(o.rotation) : null),
+      : (o.isChair ? facingWord(o.facingRot) : null),
     closeToAnother: o.nn <= 3,
   }));
   const clusters = objs.filter(o => o.isTable).map(t => ({
@@ -3491,7 +3494,24 @@ function buildLayoutManifest(space, items, flip) {
     chairIds: objs.filter(o => o.table === t).map(o => idOf.get(o)),
   }));
   const standaloneChairs = objs.filter(o => o.isChair && !o.table).map(o => idOf.get(o));
-  return { roomWidthFt: W, roomDepthFt: D, totalObjects: objects.length, objects, clusters, standaloneChairs };
+
+  // Where the stage / LED wall sits IN THIS VIEW, so the renderer can tie an
+  // abstract facing ("toward the far wall") to the thing the client actually
+  // means ("facing the LED wall"). Computed in the same flipped photo frame as
+  // every coordinate above: from the stage the stage is behind/at the camera,
+  // facing the stage it is the far wall.
+  let stage = null;
+  const stageFx = (space.fixtures || []).find(f => f && f.type === 'stage');
+  if (stageFx) {
+    const scx = tx(stageFx.x + stageFx.w / 2), scy = ty(stageFx.y + stageFx.h / 2);
+    stage = {
+      xFt: r1(scx), yFt: r1(scy),
+      // The photo-frame rotation a chair needs in order to face the stage.
+      facingRot: scy < D / 2 ? 0 : 180,
+      side: scy < D / 3 ? 'far' : scy > 2 * D / 3 ? 'near' : 'mid',
+    };
+  }
+  return { roomWidthFt: W, roomDepthFt: D, totalObjects: objects.length, objects, clusters, standaloneChairs, stage };
 }
 
 // Human-readable furniture summary for the AI prompt, e.g.
