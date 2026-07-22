@@ -53,7 +53,27 @@
       "Bash(swift /tmp/extract.swift)",
       "Bash(curl -s -o /dev/null -w \"home:%{http_code}\\\\n\" https://trivision-event-designer.vercel.app/)",
       "Bash(curl -s -w \" me:%{http_code}\\\\n\" https://trivision-event-designer.vercel.app/api/me)",
-      "Bash(gh auth:*)"
+      "Bash(gh auth:*)",
+      "Bash(git push:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(July 4, 2026\"\\) with a \"Date TBD\" fallback.:*)",
+      "Bash(vercel ls:*)",
+      "Bash(npm test:*)",
+      "Bash(timeout 6 node server.js)",
+      "Bash(curl -s -o /dev/null -w \"port 3400 -> HTTP %{http_code}\\\\n\" http://localhost:3400/)",
+      "Bash(python3 -)",
+      "Bash(awk 'NR<4854 && /^function [A-Z]/ {last=NR\": \"$0} END{}' public/index.html)",
+      "Bash(awk '/^function [A-Z]/ {if \\(NR<4854\\) last=NR\" \"$2} END {print last}' public/index.html)",
+      "Bash(ls -lt ~/Downloads 2>/dev/null | head -15; echo \"=== Desktop ===\"; ls -lt ~/Desktop 2>/dev/null | head -15)",
+      "Bash(cp \"/Users/aryalutfi/Downloads/ChatGPT Image Jul 3, 2026 at 11_26_25 AM.png\" \"public/studio-c/empty-room.png\")",
+      "Bash(sips -g pixelWidth -g pixelHeight -g format \"public/studio-c/empty-room.png\")",
+      "Bash(git ls-files *)",
+      "Bash(git check-ignore *)",
+      "Bash(sips -Z 1536 \"/Users/aryalutfi/Downloads/WhatsApp Image 2026-07-03 at 11.13.20.jpeg\" --out public/studio-c/furniture/round-60.jpg)",
+      "Bash(sips -Z 1536 \"/Users/aryalutfi/Downloads/WhatsApp Image 2026-07-03 at 11.13.20 \\(2\\).jpeg\" --out public/studio-c/furniture/banquet-chair.jpg)",
+      "Bash(ls -la public/studio-a public/studio-c public/furniture)",
+      "Bash(ls -la public/studio-b)"
     ]
   }
 }
