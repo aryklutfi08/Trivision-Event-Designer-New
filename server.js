@@ -602,25 +602,31 @@ const STUDIO_RENDER = {
 // lighting, realism — it must never ADD objects or redesign the setup. The
 // one opt-in exception is décor greenery (the 🌿 toggle in the render
 // overlay): edge-of-room plants that never touch the furniture layout.
-const presentationStyle = (decor) =>
+const presentationStyle = (decor, tableLamp) =>
   'PRESENTATION QUALITY (strictly secondary to layout preservation): render the scene as a polished, professional event-venue '
-  + 'photograph — realistic materials, crisp linens, natural soft shadows, warm flattering light from the room\'s EXISTING '
-  + 'fixtures, and clean photographic composition. Do NOT add any new objects to achieve this: no chandeliers, '
+  + 'photograph — realistic materials, crisp linens, natural soft shadows, and a beautiful SUBTLE BLUEISH AMBIENT GLOW: cool '
+  + 'blue-toned ambient light gently washing the room from the room\'s EXISTING fixtures, elegant and understated (a soft '
+  + 'cinematic blue ambience, never neon, never oversaturated), with clean photographic composition. Do NOT add any new '
+  + 'objects to achieve this: no chandeliers, '
   + (decor ? '' : 'no plants or greenery, no flowers, ')
-  + 'no lamps, no draping, no décor items, and no furniture beyond what the manifest lists. Where the room has a stage, LED '
+  + 'no floor lamps' + (tableLamp ? ' (the one required cordless tabletop lamp per table is the sole exception)' : '')
+  + ', no draping, no décor items, and no furniture beyond what the manifest lists. Where the room has a stage, LED '
   + 'wall, or professional stage lighting, those remain the visual centerpiece. Accuracy to the submitted floor plan matters '
   + 'MORE than making the image look full, symmetric, or fancy — an exact, sparse-looking room is correct; an embellished one '
   + 'is wrong.'
   + (decor
     ? '\n\nBEAUTIFICATION (requested by the client — the layout rules above still override everything): make the scene gorgeous, '
       + 'upscale and event-ready while staying photorealistic, using ONLY these two additions:\n'
-      + '• AESTHETIC LIGHTING — a warm, inviting ambient glow; cinematic uplighting washing the walls and drapes; soft pools of '
-      + 'light on the floor; gentle highlights on the linens.\n'
+      + '• AESTHETIC LIGHTING — a beautiful, subtle blueish ambient glow; cinematic cool-blue uplighting washing the walls and '
+      + 'drapes; soft pools of blue-tinted light on the floor; gentle highlights on the linens. Keep the blue elegant and '
+      + 'understated — a refined cinematic ambience, never neon or oversaturated.\n'
       + '• CEILING CHANDELIERS — elegant crystal or champagne-gold chandeliers hanging from the ceiling structure/truss, glowing '
       + 'warmly, plus tall potted greenery standing flat against the WALLS and in the room\'s CORNERS only.\n'
       + 'HARD LIMITS — accuracy wins over decoration: everything you add lives on the CEILING or against the WALLS/CORNERS. Add '
-      + 'NOTHING on the open floor and NOTHING under, between, beside or on top of any table or chair — specifically no rugs, no '
-      + 'dance floor, no platforms, no risers, no plants, no lamps, no props and no decorations placed among the furniture. Any '
+      + 'NOTHING on the open floor and NOTHING under, between, beside or on top of any table or chair'
+      + (tableLamp ? ' (except the one required cordless tabletop lamp per table)' : '')
+      + ' — specifically no rugs, no '
+      + 'dance floor, no platforms, no risers, no plants, no floor lamps, no props and no decorations placed among the furniture. Any '
       + 'open floor area (aisles, walkways, the empty centre of a U-shape) must remain bare floor. Never move, add, remove, crowd '
       + 'or replace a table or chair; never block sightlines to the stage.'
     : '');
@@ -948,6 +954,16 @@ app.post('/api/render-studio-c', async (req, res) => {
     // preview is the faster, more approximate look.
     const strictLayout = (req.body || {}).mode === 'hd';
 
+    // Cordless table-lamp reference (public/furniture/table-lamp.jpg): the
+    // venue puts one on every table, so any layout that contains tables ships
+    // the real product photo as a styling reference plus a one-per-table
+    // placement directive.
+    const lampRefPath = path.join(PUBLIC_DIR, 'furniture', 'table-lamp.jpg');
+    const lampRef = (fs.existsSync(lampRefPath)
+      && manifest && Array.isArray(manifest.objects)
+      && manifest.objects.some(o => o && typeof o.type === 'string' && /table/i.test(o.type)))
+      ? { path: lampRefPath, mime: 'image/jpeg' } : null;
+
     // Exact per-type totals, restated as the LAST layout instruction in the
     // prompt so the model tallies its output against them before finishing.
     let finalCountCheck = '';
@@ -961,7 +977,8 @@ app.post('/api/render-studio-c', async (req, res) => {
         finalCountCheck = `FINAL COUNT CHECK — before finishing, COUNT the furniture in your image. It must contain ${countList}, `
           + 'and NOTHING else. Not one piece more, not one piece fewer. If any count differs, the image is wrong.'
           + (decorOn ? ' (The requested décor — chandeliers, rugs under tables, edge-of-room plants — is allowed and does not '
-            + 'count as furniture.)' : '');
+            + 'count as furniture.)' : '')
+          + (lampRef ? ' (The small cordless table lamp required on every tabletop is allowed and does not count as furniture.)' : '');
       }
     }
 
@@ -1036,6 +1053,7 @@ app.post('/api/render-studio-c', async (req, res) => {
     const roomIdx = ++imgN;
     const planIdx = planBuf ? ++imgN : 0;
     const firstFurnIdx = imgN + 1;
+    const lampIdx = lampRef ? firstFurnIdx + furnRefs.length : 0;
     const ord = { 1: 'FIRST', 2: 'SECOND', 3: 'THIRD', 4: 'FOURTH' };
 
     const prompt = guideBuf ? [
@@ -1116,13 +1134,23 @@ app.post('/api/render-studio-c', async (req, res) => {
       presetText ? `The arrangement style is "${presetText}".` : '',
       // Beautification applies only to furnished renders; empty-room renders
       // stay true to the reference photo.
-      manifestText ? presentationStyle(decorOn) : '',
+      manifestText ? presentationStyle(decorOn, !!lampRef) : '',
       ...furnRefs.map((ref, i) =>
         `Image ${firstFurnIdx + i} is a real photo of this venue's "${ref.label}" setup — replicate that exact styling `
         + '(same linens, chair covers, colors, and decor) at every position of that furniture type in the plan. IMPORTANT: copy '
         + 'ONLY the look/materials of that one furniture piece — NOT the number of chairs or how full the table is. If this '
         + 'reference photo shows a table ringed with chairs, ignore that count entirely; the manifest above is the ONLY authority '
         + 'on how many chairs each table has (some tables are bare, some have only a few) and where every piece goes.'),
+      lampRef
+        ? `Image ${lampIdx} is a real photo of this venue's cordless table lamp: a slim lamp with a round matte-gold base, a thin `
+          + 'gold stem, and a dark cylindrical shade that glows warmly from underneath. REQUIRED ADDITION: place EXACTLY ONE of '
+          + 'these lamps standing upright at the CENTRE of EVERY table in the layout — no table is left without one — lit, casting '
+          + 'a soft warm pool of light onto the linen around it. Keep it true to scale: a small tabletop lamp about the height of a '
+          + 'wine bottle, never large enough to block sightlines or hide furniture. This lamp is the ONLY addition permitted beyond '
+          + 'the manifest — the no-lamps / no-new-objects rules elsewhere in this prompt ban FLOOR lamps and décor, not this '
+          + 'required tabletop lamp. Place it ONLY on tabletops, exactly one per table, and never let it replace, crowd, or obscure '
+          + 'any listed furniture.'
+        : '',
       extraRoomRefs.length
         ? `The LAST ${extraRoomRefs.length} image(s) show the SAME empty room from other angles. Use them ONLY to understand the `
           + 'room\'s true materials, colours, lighting, and finishes. '
@@ -1173,7 +1201,7 @@ app.post('/api/render-studio-c', async (req, res) => {
     if (process.env.RENDER_DEBUG !== 'off') {
       const objCount = manifest && Array.isArray(manifest.objects) ? manifest.objects.length : 0;
       console.log('\n' + '='.repeat(70));
-      console.log(`[render ${spaceId}/${mode}] angle: ${chosenAngle ? chosenAngle.id : 'default'} · base: ${path.basename(roomRef.path)} · ${objCount} object(s) · guide: ${guideBuf ? 'yes' : 'no'} · plan image: ${planBuf ? 'yes' : 'no'} · furniture refs: ${furnRefs.length} · extra room refs: ${extraRoomRefs.length}`);
+      console.log(`[render ${spaceId}/${mode}] angle: ${chosenAngle ? chosenAngle.id : 'default'} · base: ${path.basename(roomRef.path)} · ${objCount} object(s) · guide: ${guideBuf ? 'yes' : 'no'} · plan image: ${planBuf ? 'yes' : 'no'} · furniture refs: ${furnRefs.length} · lamp ref: ${lampRef ? 'yes' : 'no'} · extra room refs: ${extraRoomRefs.length}`);
       console.log('-'.repeat(70) + '\nPROMPT:\n' + promptText);
       if (manifest) {
         console.log('-'.repeat(70) + '\nMANIFEST (raw objects with coordinates):');
@@ -1221,6 +1249,11 @@ app.post('/api/render-studio-c', async (req, res) => {
       furnRefs.forEach((ref) => {
         form.append('image[]', new Blob([fs.readFileSync(ref.path)], { type: ref.mime }), path.basename(ref.path));
       });
+      // Table-lamp reference sits between the furniture refs and the extra
+      // room refs so the "LAST N image(s)" citation for those stays true.
+      if (lampRef) {
+        form.append('image[]', new Blob([fs.readFileSync(lampRef.path)], { type: lampRef.mime }), path.basename(lampRef.path));
+      }
       extraRoomRefs.forEach((ref) => {
         form.append('image[]', new Blob([fs.readFileSync(ref.path)], { type: ref.mime }), path.basename(ref.path));
       });
