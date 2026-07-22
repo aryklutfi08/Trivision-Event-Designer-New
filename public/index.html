@@ -298,13 +298,13 @@ const DESIGNABLE_ROOMS = BUILDING.rooms.map(r => ({
 
 // All measurements in feet
 const FURNITURE_LIBRARY = [
-  { id: 'round-60', label: 'Small Round Table', type: 'table', shape: 'circle', diameter: 5, capacity: 6, color: '#3b4458', stock: 23 },
-  { id: 'round-72', label: 'Big Round Table', type: 'table', shape: 'circle', diameter: 6, capacity: 10, color: '#3b4458', stock: 5 },
-  { id: 'cocktail', label: 'Cocktail Table', type: 'table', shape: 'circle', diameter: 2.5, capacity: 4, color: '#23262e', stock: 6 },
-  { id: 'rect-6', label: 'Long Table (2×6)', type: 'table', shape: 'rect', w: 6, h: 2, capacity: 6, color: '#3b4458', stock: 10 },
-  { id: 'rect-8', label: 'Long Table (3×8)', type: 'table', shape: 'rect', w: 8, h: 3, capacity: 8, color: '#3b4458', stock: 10 },
-  { id: 'banquet-chair', label: 'Black Chair', type: 'chair', shape: 'rect', w: 1.5, h: 1.5, capacity: 1, color: '#23262e', stock: 200 },
-  { id: 'theatre-chair', label: 'Theatre Chair', type: 'chair', shape: 'rect', w: 1.5, h: 1.5, capacity: 1, color: '#23262e' },
+  { id: 'round-60', label: 'Small Round Table', type: 'table', shape: 'circle', diameter: 5, capacity: 6, color: '#141519', stock: 23 },
+  { id: 'round-72', label: 'Big Round Table', type: 'table', shape: 'circle', diameter: 6, capacity: 10, color: '#141519', stock: 5 },
+  { id: 'cocktail', label: 'Cocktail Table', type: 'table', shape: 'circle', diameter: 2.5, capacity: 4, color: '#141519', stock: 6 },
+  { id: 'rect-6', label: 'Long Table (2×6)', type: 'table', shape: 'rect', w: 6, h: 2, capacity: 6, color: '#141519', stock: 10 },
+  { id: 'rect-8', label: 'Long Table (3×8)', type: 'table', shape: 'rect', w: 8, h: 3, capacity: 8, color: '#141519', stock: 10 },
+  { id: 'banquet-chair', label: 'Black Chair', type: 'chair', shape: 'rect', w: 1.5, h: 1.5, capacity: 1, color: '#141519', stock: 200 },
+  { id: 'theatre-chair', label: 'Theatre Chair', type: 'chair', shape: 'rect', w: 1.5, h: 1.5, capacity: 1, color: '#141519' },
   { id: 'lounge-sofa', label: 'Lounge Sofa', type: 'lounge', shape: 'rect', w: 5, h: 2.5, capacity: 3, color: '#5a4a3a' },
   { id: 'lounge-chair', label: 'Lounge Chair', type: 'lounge', shape: 'rect', w: 2.5, h: 2.5, capacity: 1, color: '#5a4a3a' },
   { id: 'podium', label: 'Podium / Lectern', type: 'fixture', shape: 'rect', w: 2, h: 1.5, capacity: 0, color: '#c8a96a' },
@@ -1087,7 +1087,7 @@ function buildFurnitureMesh(item, f, isSelected) {
     // 4 legs
     for (let i = -1; i <= 1; i += 2) {
       for (let j = -1; j <= 1; j += 2) {
-        const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.4, 0.12), makeMat({ color: 0x2a2f3d }));
+        const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.4, 0.12), makeMat({ color: 0x141519 }));
         leg.position.set(i * 0.55, 0.7, j * 0.55);
         leg.castShadow = true;
         group.add(leg);
@@ -1095,7 +1095,7 @@ function buildFurnitureMesh(item, f, isSelected) {
     }
   } else if (f.type === 'table' && f.shape === 'circle') {
     const r = f.diameter / 2;
-    const tableMat = makeMat({ color: 0x22252c, roughness: 0.85 });
+    const tableMat = makeMat({ color: 0x141519, roughness: 0.85 });
     const top = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.18, 36), tableMat);
     top.position.y = 2.5;
     top.castShadow = true;
@@ -1104,16 +1104,16 @@ function buildFurnitureMesh(item, f, isSelected) {
     // Black floor-length linen drape, matching the venue's real styling
     const drape = new THREE.Mesh(
       new THREE.CylinderGeometry(r, r, 2.4, 36, 1, true),
-      new THREE.MeshStandardMaterial({ color: 0x191b21, side: THREE.DoubleSide, roughness: 0.92 })
+      new THREE.MeshStandardMaterial({ color: 0x0f1013, side: THREE.DoubleSide, roughness: 0.92 })
     );
     drape.position.y = 1.2;
     group.add(drape);
     // Pedestal
-    const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 2.4, 16), makeMat({ color: 0x2a2f3d }));
+    const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 2.4, 16), makeMat({ color: 0x141519 }));
     pedestal.position.y = 1.2;
     group.add(pedestal);
     // Base
-    const base = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.4, r * 0.45, 0.12, 24), makeMat({ color: 0x2a2f3d }));
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.4, r * 0.45, 0.12, 24), makeMat({ color: 0x141519 }));
     base.position.y = 0.06;
     base.receiveShadow = true;
     group.add(base);
@@ -1131,7 +1131,7 @@ function buildFurnitureMesh(item, f, isSelected) {
   } else if (f.type === 'table' && f.shape === 'rect') {
     const w = f.w;
     const d = f.h;
-    const top = new THREE.Mesh(new THREE.BoxGeometry(w, 0.18, d), makeMat({ color: 0x22252c, roughness: 0.85 }));
+    const top = new THREE.Mesh(new THREE.BoxGeometry(w, 0.18, d), makeMat({ color: 0x141519, roughness: 0.85 }));
     top.position.y = 2.5;
     top.castShadow = true;
     top.receiveShadow = true;
@@ -1139,7 +1139,7 @@ function buildFurnitureMesh(item, f, isSelected) {
     // Black floor-length linen drape, matching the venue's real styling
     const drape = new THREE.Mesh(
       new THREE.BoxGeometry(w, 2.4, d),
-      new THREE.MeshStandardMaterial({ color: 0x191b21, roughness: 0.92 })
+      new THREE.MeshStandardMaterial({ color: 0x0f1013, roughness: 0.92 })
     );
     drape.position.y = 1.2;
     drape.castShadow = true;
