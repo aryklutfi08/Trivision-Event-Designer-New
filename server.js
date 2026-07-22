@@ -560,8 +560,8 @@ const STUDIO_RENDER = {
   A: {
     name: 'Studio A',
     dir: 'studio-a',
-    description: 'a large black-box event studio: a black open ceiling crossed by exposed metal truss/rigging with bright suspended '
-      + 'stage spotlights; matte black walls; a full-height dark stage curtain/drape running along the right wall; a tan-gray carpet '
+    description: 'a large black-box event studio: a black open ceiling crossed by exposed metal truss/rigging; matte black walls; '
+      + 'a full-height dark stage curtain/drape running along the right wall; a tan-gray carpet '
       + 'floor marked with faint white tape lines; a freestanding white cube partition wall with a rectangular window opening on the '
       + 'left; a green hedge/greenery wall with a red carpet runner in the far-left background; a recessed brushed-gold niche set into '
       + 'the black back wall; and a glossy black stone counter surface spanning the foreground.',
@@ -588,10 +588,10 @@ const STUDIO_RENDER = {
         id: 'facing-stage', file: 'angle-facing-stage.jpg', label: 'Facing the stage', flip: false,
         description: 'a large black-box event studio seen from the back of the room looking toward the main stage: a low black '
           + 'stage riser carrying a large LED video wall (the bright focal point in the center distance, typically showing vibrant '
-          + 'content); a black open ceiling crossed by exposed metal box-truss rigging hung with warm theatrical spotlights; '
+          + 'content); a black open ceiling crossed by exposed metal box-truss rigging; '
           + 'full-height black blackout drapes running down the LEFT wall and across the back; on the RIGHT a long white wall with '
           + 'a row of large glass windows and a built-in kitchenette/pantry, fronted by a red carpet runner along its base; and a '
-          + 'dark charcoal-gray carpet covering the floor. The mood is dark and dramatic, lit by warm spotlights pooling on the floor.',
+          + 'dark charcoal-gray carpet covering the floor. The mood is dark and dramatic, with soft ambient light pooling on the floor.',
       },
     ],
   },
@@ -605,23 +605,29 @@ const STUDIO_RENDER = {
 const presentationStyle = (decor, tableLamp) =>
   'PRESENTATION QUALITY (strictly secondary to layout preservation): render the scene as a polished, professional event-venue '
   + 'photograph — realistic materials, crisp linens, natural soft shadows, and a beautiful SUBTLE BLUEISH AMBIENT GLOW: cool '
-  + 'blue-toned ambient light gently washing the room from the room\'s EXISTING fixtures, elegant and understated (a soft '
-  + 'cinematic blue ambience, never neon, never oversaturated), with clean photographic composition. Do NOT add any new '
+  + 'blue-toned ambient light washing the room from the room\'s EXISTING fixtures. Make the ambience RICH and immersive — '
+  + 'deep, layered, cinematic light with atmospheric depth, luxurious and moody — while staying elegant and tasteful: never '
+  + 'neon, never oversaturated. Clean photographic composition. Do NOT add any new '
   + 'objects to achieve this: no chandeliers, '
   + (decor ? '' : 'no plants or greenery, no flowers, ')
   + 'no floor lamps' + (tableLamp ? ' (the one required cordless tabletop lamp per table is the sole exception)' : '')
-  + ', no draping, no décor items, and no furniture beyond what the manifest lists. Where the room has a stage, LED '
-  + 'wall, or professional stage lighting, those remain the visual centerpiece. Accuracy to the submitted floor plan matters '
+  + ', no draping, no décor items, and no furniture beyond what the manifest lists. Where the room has a stage or LED '
+  + 'wall, those remain the visual centerpiece. NO STAGE-LIGHTING FIXTURES: remove all professional stage lights from the '
+  + 'scene — truss-mounted spotlights, moving heads, par cans, beam lights and light stands must NOT appear in the final '
+  + 'image, even if the room description or the reference photos show them. The room\'s lighting mood comes entirely from '
+  + 'the aesthetic ambient lighting described above, never from visible stage-light fixtures. Accuracy to the submitted floor plan matters '
   + 'MORE than making the image look full, symmetric, or fancy — an exact, sparse-looking room is correct; an embellished one '
   + 'is wrong.'
   + (decor
     ? '\n\nBEAUTIFICATION (requested by the client — the layout rules above still override everything): make the scene gorgeous, '
       + 'upscale and event-ready while staying photorealistic, using ONLY these two additions:\n'
       + '• AESTHETIC LIGHTING — a beautiful, subtle blueish ambient glow; cinematic cool-blue uplighting washing the walls and '
-      + 'drapes; soft pools of blue-tinted light on the floor; gentle highlights on the linens. Keep the blue elegant and '
-      + 'understated — a refined cinematic ambience, never neon or oversaturated.\n'
+      + 'drapes; soft pools of blue-tinted light on the floor; gentle highlights on the linens. Make the ambience RICH and '
+      + 'immersive — deep, layered, atmospheric light with a luxurious, moody depth — while keeping the blue elegant and '
+      + 'refined: never neon or oversaturated.\n'
       + '• CEILING CHANDELIERS — elegant crystal or champagne-gold chandeliers hanging from the ceiling structure/truss, glowing '
-      + 'warmly, plus tall potted greenery standing flat against the WALLS and in the room\'s CORNERS only.\n'
+      + 'warmly, and rendered GENEROUSLY SIZED: about 20% larger than a typical chandelier, so they read as grand statement '
+      + 'pieces, plus tall potted greenery standing flat against the WALLS and in the room\'s CORNERS only.\n'
       + 'HARD LIMITS — accuracy wins over decoration: everything you add lives on the CEILING or against the WALLS/CORNERS. Add '
       + 'NOTHING on the open floor and NOTHING under, between, beside or on top of any table or chair'
       + (tableLamp ? ' (except the one required cordless tabletop lamp per table)' : '')
