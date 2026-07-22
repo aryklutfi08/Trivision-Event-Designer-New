@@ -300,11 +300,11 @@ const DESIGNABLE_ROOMS = BUILDING.rooms.map(r => ({
 const FURNITURE_LIBRARY = [
   { id: 'round-60', label: 'Small Round Table', type: 'table', shape: 'circle', diameter: 5, capacity: 6, color: '#3b4458', stock: 23 },
   { id: 'round-72', label: 'Big Round Table', type: 'table', shape: 'circle', diameter: 6, capacity: 10, color: '#3b4458', stock: 5 },
-  { id: 'cocktail', label: 'Cocktail Table', type: 'table', shape: 'circle', diameter: 2.5, capacity: 4, color: '#4a3d2b', stock: 6 },
+  { id: 'cocktail', label: 'Cocktail Table', type: 'table', shape: 'circle', diameter: 2.5, capacity: 4, color: '#23262e', stock: 6 },
   { id: 'rect-6', label: 'Long Table (2×6)', type: 'table', shape: 'rect', w: 6, h: 2, capacity: 6, color: '#3b4458', stock: 10 },
   { id: 'rect-8', label: 'Long Table (3×8)', type: 'table', shape: 'rect', w: 8, h: 3, capacity: 8, color: '#3b4458', stock: 10 },
-  { id: 'banquet-chair', label: 'Black Chair', type: 'chair', shape: 'rect', w: 1.5, h: 1.5, capacity: 1, color: '#8a99b8', stock: 200 },
-  { id: 'theatre-chair', label: 'Theatre Chair', type: 'chair', shape: 'rect', w: 1.5, h: 1.5, capacity: 1, color: '#8a99b8' },
+  { id: 'banquet-chair', label: 'Black Chair', type: 'chair', shape: 'rect', w: 1.5, h: 1.5, capacity: 1, color: '#23262e', stock: 200 },
+  { id: 'theatre-chair', label: 'Theatre Chair', type: 'chair', shape: 'rect', w: 1.5, h: 1.5, capacity: 1, color: '#23262e' },
   { id: 'lounge-sofa', label: 'Lounge Sofa', type: 'lounge', shape: 'rect', w: 5, h: 2.5, capacity: 3, color: '#5a4a3a' },
   { id: 'lounge-chair', label: 'Lounge Chair', type: 'lounge', shape: 'rect', w: 2.5, h: 2.5, capacity: 1, color: '#5a4a3a' },
   { id: 'podium', label: 'Podium / Lectern', type: 'fixture', shape: 'rect', w: 2, h: 1.5, capacity: 0, color: '#c8a96a' },
@@ -1050,6 +1050,25 @@ function buildFurnitureMesh(item, f, isSelected) {
       overrides
     ));
 
+  // The venue dresses every table in black floor-length linen with a gold
+  // cordless lamp at its centre, and every chair in a black spandex cover —
+  // the 3D planner mirrors that real styling so it matches the AI renders.
+  const addTableLamp = (topY) => {
+    const gold = new THREE.MeshStandardMaterial({ color: 0xc9a45c, metalness: 0.85, roughness: 0.35 });
+    const lampBase = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.05, 16), gold);
+    lampBase.position.y = topY + 0.03;
+    group.add(lampBase);
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.85, 8), gold);
+    stem.position.y = topY + 0.45;
+    group.add(stem);
+    const shade = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.3, 0.26, 0.35, 16),
+      new THREE.MeshStandardMaterial({ color: 0x241f18, roughness: 0.6, emissive: 0xffb85c, emissiveIntensity: 0.35 })
+    );
+    shade.position.y = topY + 1.0;
+    group.add(shade);
+  };
+
   // Geometry is always built in its natural orientation; visible rotation is
   // applied at the end via group.rotation.y so chairs, tables, and lounges all
   // physically spin around their own center.
@@ -1076,16 +1095,16 @@ function buildFurnitureMesh(item, f, isSelected) {
     }
   } else if (f.type === 'table' && f.shape === 'circle') {
     const r = f.diameter / 2;
-    const tableMat = makeMat({ color: 0xffffff, roughness: 0.3 });
+    const tableMat = makeMat({ color: 0x22252c, roughness: 0.85 });
     const top = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.18, 36), tableMat);
     top.position.y = 2.5;
     top.castShadow = true;
     top.receiveShadow = true;
     group.add(top);
-    // Linen drape — slightly larger, semi-transparent
+    // Black floor-length linen drape, matching the venue's real styling
     const drape = new THREE.Mesh(
       new THREE.CylinderGeometry(r, r, 2.4, 36, 1, true),
-      new THREE.MeshStandardMaterial({ color: 0xf5f1ea, side: THREE.DoubleSide, roughness: 0.9 })
+      new THREE.MeshStandardMaterial({ color: 0x191b21, side: THREE.DoubleSide, roughness: 0.92 })
     );
     drape.position.y = 1.2;
     group.add(drape);
@@ -1108,24 +1127,25 @@ function buildFurnitureMesh(item, f, isSelected) {
       pedestal.geometry.dispose();
       pedestal.geometry = new THREE.CylinderGeometry(0.2, 0.2, 3.6, 16);
     }
+    addTableLamp(top.position.y + 0.09);
   } else if (f.type === 'table' && f.shape === 'rect') {
     const w = f.w;
     const d = f.h;
-    const top = new THREE.Mesh(new THREE.BoxGeometry(w, 0.18, d), makeMat({ color: 0xeae4d6, roughness: 0.4 }));
+    const top = new THREE.Mesh(new THREE.BoxGeometry(w, 0.18, d), makeMat({ color: 0x22252c, roughness: 0.85 }));
     top.position.y = 2.5;
     top.castShadow = true;
     top.receiveShadow = true;
     group.add(top);
-    // Legs at corners
-    const legMat = makeMat({ color: 0x2a2f3d });
-    for (let i = -1; i <= 1; i += 2) {
-      for (let j = -1; j <= 1; j += 2) {
-        const leg = new THREE.Mesh(new THREE.BoxGeometry(0.18, 2.4, 0.18), legMat);
-        leg.position.set(i * (w / 2 - 0.15), 1.2, j * (d / 2 - 0.15));
-        leg.castShadow = true;
-        group.add(leg);
-      }
-    }
+    // Black floor-length linen drape, matching the venue's real styling
+    const drape = new THREE.Mesh(
+      new THREE.BoxGeometry(w, 2.4, d),
+      new THREE.MeshStandardMaterial({ color: 0x191b21, roughness: 0.92 })
+    );
+    drape.position.y = 1.2;
+    drape.castShadow = true;
+    drape.receiveShadow = true;
+    group.add(drape);
+    addTableLamp(top.position.y + 0.09);
   } else if (f.type === 'lounge') {
     const w = f.w;
     const d = f.h;
